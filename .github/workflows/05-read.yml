@@ -1,0 +1,305 @@
+name: 🌐 Automatic Web Archiver
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Single URL to archive (leave empty to use urls.txt)'
+        required: false
+        type: string
+  schedule:
+    # هر ۳۰ دقیقه اجرا می‌شود – می‌توانید این مقدار را تغییر دهید
+    - cron: '*/30 * * * *'
+
+concurrency:
+  group: web-archiver-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl zip
+
+      - name: Install Node dependencies
+        run: |
+          npm init -y
+          npm install puppeteer jsdom @mozilla/readability
+
+      - name: Create screenshot script
+        run: |
+          cat > screenshot.js << 'ENDOFSCRIPT'
+          const puppeteer = require('puppeteer');
+          const url = process.argv[2];
+          const outputPath = process.argv[3];
+
+          (async () => {
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            });
+            const page = await browser.newPage();
+            await page.setViewport({ width: 1280, height: 720 });
+
+            try {
+              await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+              await page.screenshot({ path: outputPath, fullPage: true });
+              console.log('Screenshot saved successfully');
+            } catch (err) {
+              console.error('Screenshot error:', err.message);
+              process.exit(1);
+            } finally {
+              await browser.close();
+            }
+          })();
+          ENDOFSCRIPT
+
+      - name: Create article extractor script
+        run: |
+          cat > extract-article.js << 'ENDOFSCRIPT'
+          const { Readability } = require('@mozilla/readability');
+          const { JSDOM } = require('jsdom');
+          const fs = require('fs');
+
+          const htmlPath = process.argv[2];
+          const outputPath = process.argv[3];
+
+          try {
+            const html = fs.readFileSync(htmlPath, 'utf8');
+            const doc = new JSDOM(html, { url: 'https://example.com' });
+            const reader = new Readability(doc.window.document);
+            const article = reader.parse();
+
+            if (article && article.textContent) {
+              fs.writeFileSync(outputPath, article.textContent, 'utf8');
+              console.log('Article text extracted successfully');
+              process.exit(0);
+            } else {
+              console.error('Could not extract article content');
+              process.exit(1);
+            }
+          } catch (err) {
+            console.error('Extraction error:', err.message);
+            process.exit(1);
+          }
+          ENDOFSCRIPT
+
+      - name: Archive web pages
+        env:
+          MANUAL_URL: ${{ github.event.inputs.url }}
+        run: |
+          set -o pipefail
+          # لیست نهایی URLها را می‌سازیم
+          if [ -n "$MANUAL_URL" ]; then
+            # اجرای دستی با URL مشخص
+            SINGLE_URL="$MANUAL_URL"
+            echo "Manual URL provided: $SINGLE_URL"
+            URL_LIST=("$SINGLE_URL")
+          elif [ -f "urls.txt" ]; then
+            # اجرای زمان‌بندی‌شده – خواندن از فایل
+            echo "Reading URLs from urls.txt"
+            mapfile -t URL_LIST < urls.txt
+            # حذف خطوط خالی
+            URL_LIST=("${URL_LIST[@]//$'\n'/}")
+            # فیلتر خطوط خالی
+            URL_LIST=($(printf '%s\n' "${URL_LIST[@]}" | sed '/^[[:space:]]*$/d'))
+          else
+            echo "No URL provided and urls.txt not found. Exiting."
+            exit 0
+          fi
+
+          if [ ${#URL_LIST[@]} -eq 0 ]; then
+            echo "URL list is empty. Exiting."
+            exit 0
+          fi
+
+          echo "Will archive ${#URL_LIST[@]} URL(s)"
+
+          # دایرکتوری پایه آرشیو
+          ARCHIVE_DIR="archive"
+          mkdir -p "$ARCHIVE_DIR"
+
+          # فایل فهرست اصلی آرشیو
+          INDEX_FILE="archive.md"
+          if [ ! -f "$INDEX_FILE" ]; then
+            echo "# Web Archive" > "$INDEX_FILE"
+            echo "" >> "$INDEX_FILE"
+            echo "## Archived Pages" >> "$INDEX_FILE"
+            echo "" >> "$INDEX_FILE"
+          fi
+
+          # پردازش هر URL
+          for CURRENT_URL in "${URL_LIST[@]}"; do
+            # عادی‌سازی URL
+            RAW_URL="$CURRENT_URL"
+            if [[ ! "$RAW_URL" =~ ^https?:// ]]; then
+              HTTPS_URL="https://$RAW_URL"
+              HTTP_URL="http://$RAW_URL"
+              echo "Trying HTTPS: $HTTPS_URL"
+              if curl -L --connect-timeout 10 --max-time 30 -o /dev/null -s -w "%{http_code}" "$HTTPS_URL" | grep -Eq "200|301|302|303|307|308"; then
+                URL="$HTTPS_URL"
+                echo "HTTPS works, using $URL"
+              else
+                echo "HTTPS failed, falling back to HTTP"
+                URL="$HTTP_URL"
+              fi
+            else
+              URL="$RAW_URL"
+            fi
+
+            echo "Archiving: $URL"
+
+            # استخراج دامنه و نام یکتا
+            DOMAIN=$(echo "$URL" | awk -F/ '{print $3}' | sed 's/^www\.//')
+            SLUG=$(echo "$URL" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-100)
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            FOLDER="$ARCHIVE_DIR/$DOMAIN/$SLUG/$TIMESTAMP"
+            MEDIA_FOLDER="$FOLDER/media"
+            mkdir -p "$FOLDER" "$MEDIA_FOLDER"
+
+            # دانلود HTML
+            echo "Downloading HTML..."
+            curl -L -A "Mozilla/5.0" -o "$FOLDER/page.html" "$URL" || { echo "Failed to download HTML for $URL"; continue; }
+
+            # اسکرین‌شات
+            echo "Taking screenshot..."
+            node screenshot.js "$URL" "$FOLDER/screenshot.png" && SCREENSHOT_OK=true || SCREENSHOT_OK=false
+
+            # استخراج متن مقاله
+            echo "Extracting article text..."
+            node extract-article.js "$FOLDER/page.html" "$FOLDER/article.txt" && TEXT_OK=true || TEXT_OK=false
+
+            # استخراج لینک‌ها
+            (grep -oP 'href="\K[^"]*' "$FOLDER/page.html" || true) > "$FOLDER/all_links.txt"
+            (grep -oP "href='\K[^']*" "$FOLDER/page.html" || true) >> "$FOLDER/all_links.txt"
+            (grep -oP 'src="\K[^"]*' "$FOLDER/page.html" || true) >> "$FOLDER/all_links.txt"
+            (grep -oP "src='\K[^']*" "$FOLDER/page.html" || true) >> "$FOLDER/all_links.txt"
+            sort -u "$FOLDER/all_links.txt" -o "$FOLDER/all_links.txt"
+
+            # دانلود مدیا
+            MEDIA_EXT="png|jpg|jpeg|gif|svg|webp|bmp|ico|mp3|wav|ogg|flac|aac|mp4|webm|avi|mov|mkv|pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|tar|gz|7z"
+
+            > "$FOLDER/media_links.txt"
+            > "$FOLDER/other_links.txt"
+            > "$FOLDER/downloaded_media.md"
+            echo "## Downloaded Media Files" > "$FOLDER/downloaded_media.md"
+            echo "" >> "$FOLDER/downloaded_media.md"
+
+            BASE_PROTO_HOST="${URL%%/*}"
+            BASE_DIR="${URL%/*}"
+
+            while IFS= read -r link; do
+              [ -z "$link" ] && continue
+
+              if [[ "$link" = /* ]]; then
+                ABSOLUTE_URL="${BASE_PROTO_HOST}${link}"
+              elif [[ "$link" =~ ^https?:// ]]; then
+                ABSOLUTE_URL="$link"
+              else
+                ABSOLUTE_URL="${BASE_DIR}/${link}"
+              fi
+
+              ext="${link##*.}"
+              ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+
+              if echo "$ext_lower" | grep -Eq "^($MEDIA_EXT)$"; then
+                echo "Downloading: $ABSOLUTE_URL"
+                FILENAME=$(basename "$link" | sed 's/[?#].*//')
+                [ -z "$FILENAME" ] && FILENAME="file_$(date +%s)"
+                [ -f "$MEDIA_FOLDER/$FILENAME" ] && FILENAME="$(date +%s)_$FILENAME"
+
+                curl -L --retry 2 --max-time 60 -o "$MEDIA_FOLDER/$FILENAME" "$ABSOLUTE_URL" 2>/dev/null && {
+                  FILE_SIZE=$(stat -c%s "$MEDIA_FOLDER/$FILENAME" 2>/dev/null || echo 0)
+                  if [ "$FILE_SIZE" -gt 0 ]; then
+                    echo "$link" >> "$FOLDER/media_links.txt"
+                    if [[ "$ext_lower" =~ ^(png|jpg|jpeg|gif|svg|webp)$ ]]; then
+                      echo "![$FILENAME](./media/$FILENAME)" >> "$FOLDER/downloaded_media.md"
+                    else
+                      echo "- [$FILENAME](./media/$FILENAME) ($(( FILE_SIZE / 1024 )) KB)" >> "$FOLDER/downloaded_media.md"
+                    fi
+                    echo "OK: $FILENAME"
+                  fi
+                } || echo "Failed: $ABSOLUTE_URL"
+              else
+                echo "$link" >> "$FOLDER/other_links.txt"
+              fi
+            done < "$FOLDER/all_links.txt"
+
+            MEDIA_COUNT=$(find "$MEDIA_FOLDER" -type f 2>/dev/null | wc -l)
+
+            # ساخت فایل index.md داخلی
+            {
+              echo "# Archived: $URL"
+              echo "**Time:** $(date)"
+              echo ""
+              if [ "$SCREENSHOT_OK" = true ] && [ -f "$FOLDER/screenshot.png" ]; then
+                echo "## Screenshot"
+                echo "![Screenshot](./screenshot.png)"
+                echo ""
+              fi
+              if [ "$TEXT_OK" = true ] && [ -f "$FOLDER/article.txt" ]; then
+                echo "## Extracted Article Text"
+                echo "[Download article text](./article.txt) ($(wc -c < "$FOLDER/article.txt") bytes)"
+                echo ""
+              fi
+              echo "## Raw HTML"
+              echo "[page.html](./page.html)"
+              echo ""
+              echo "## Downloaded Media ($MEDIA_COUNT files)"
+              if [ "$MEDIA_COUNT" -gt 0 ]; then
+                cat "$FOLDER/downloaded_media.md"
+              else
+                echo "_No media files downloaded_"
+              fi
+              echo ""
+              echo "## Other Links"
+              if [ -s "$FOLDER/other_links.txt" ]; then
+                head -50 "$FOLDER/other_links.txt" | while read -r link; do
+                  echo "- [$link]($link)"
+                done
+              fi
+              echo ""
+              echo "## Stats"
+              echo "- Links found: $(wc -l < "$FOLDER/all_links.txt")"
+              echo "- Media files: $MEDIA_COUNT"
+            } > "$FOLDER/index.md"
+
+            # افزودن به فهرست اصلی آرشیو
+            echo "- [${SLUG} (${TIMESTAMP})]($FOLDER/index.md) — $MEDIA_COUNT media files" >> "$INDEX_FILE"
+
+            echo "Archived $URL to $FOLDER"
+          done
+
+          echo "Archiving completed. Index updated in $INDEX_FILE."
+
+      - name: Commit and push changes
+        run: |
+          if [ ! -d "archive" ] && [ ! -f "archive.md" ]; then
+            echo "Nothing to commit (no archive folder or archive.md)"
+            exit 0
+          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add archive/ archive.md 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+          git commit -m "Update web archive [skip ci]"
+          git pull --rebase
+          git push
