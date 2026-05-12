@@ -1,0 +1,231 @@
+name: 📊 Daily Info Snapshot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+concurrency:
+  group: daily-info-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+
+      - name: Install Node dependencies
+        run: |
+          npm init -y
+          npm install rss-parser
+
+      - name: Create daily scraper script
+        run: |
+          cat > scrape-daily.js << 'ENDOFSCRIPT'
+          const fs = require('fs');
+          const Parser = require('rss-parser');
+
+          const OUTPUT = 'daily-info.md';
+          const TIMESTAMP = new Date().toISOString().replace('T', ' ').slice(0, 19);
+          const BRS_API_KEY = process.env.BRS_API_KEY;
+
+          const rssParser = new Parser({
+            timeout: 15000,
+            headers: { 'User-Agent': 'Mozilla/5.0' }
+          });
+
+          // ─── BrsApi Price Fetcher ─────────────────────────
+          async function fetchPricesFromAPI() {
+            if (!BRS_API_KEY) {
+              console.error('BRS_API_KEY is not set. Skipping price fetch.');
+              return { error: 'کلید API تنظیم نشده است.' };
+            }
+            const apiUrl = `https://api.brsapi.ir/Api/Market/Gold_Currency.php?key=${BRS_API_KEY}`;
+            try {
+              const res = await fetch(apiUrl, { signal: AbortSignal.timeout(15000) });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              const data = await res.json();
+              
+              // Convert the flat array to an easy-to-use object
+              const prices = {};
+              if (Array.isArray(data)) {
+                for (const item of data) {
+                  if (item.name && item.price) {
+                    // Add "Toman" to the price to be explicit, though the API claims it's in Tomans.
+                    prices[item.name] = `${item.price} تومان`;
+                  }
+                }
+              }
+              return Object.keys(prices).length > 0 ? prices : { error: 'داده‌ای از API دریافت نشد.' };
+            } catch (e) {
+              console.error('BrsApi fetch error:', e.message);
+              return { error: `دریافت قیمت‌ها ناموفق: ${e.message}` };
+            }
+          }
+
+          // ─── RSS feeds ─────────────────────────────────────
+          async function fetchRSSFeeds() {
+            const feeds = [
+              { name: 'بی‌بی‌سی فارسی', url: 'https://feeds.bbci.co.uk/persian/rss.xml' },
+              { name: 'رادیو فردا', url: 'https://www.radiofarda.com/api/xtcqctq' },
+              { name: 'ایران‌وایر', url: 'https://iranwire.com/fa/rss' },
+              { name: 'ایندیپندنت فارسی', url: 'https://www.independentpersian.com/rss' },
+              { name: 'صدای آمریکا (فارسی)', url: 'https://ir.voanews.com/api/zyjuepqn' },
+              { name: 'ایسنا', url: 'https://www.isna.ir/rss' }
+            ];
+            const headlines = [];
+            for (const feed of feeds) {
+              try {
+                const parsed = await rssParser.parseURL(feed.url);
+                const items = parsed.items.slice(0, 3).map(item => item.title);
+                headlines.push({ source: feed.name, items });
+              } catch (e) {
+                console.error(`RSS ${feed.name} error:`, e.message);
+                headlines.push({ source: feed.name, items: ['دریافت نشد'] });
+              }
+            }
+            return headlines;
+          }
+
+          // ─── Weather via Open-Meteo ────────────────────────
+          async function fetchWeather() {
+            const cities = [
+              { name: 'تهران', lat: 35.6892, lon: 51.3890 },
+              { name: 'مشهد', lat: 36.2605, lon: 59.6168 },
+              { name: 'اصفهان', lat: 32.6546, lon: 51.6680 },
+              { name: 'شیراز', lat: 29.5918, lon: 52.5837 },
+              { name: 'تبریز', lat: 38.0800, lon: 46.2919 }
+            ];
+            const weatherData = [];
+            for (const city of cities) {
+              try {
+                const url = `https://api.open-meteo.com/v1/forecast?latitude=${city.lat}&longitude=${city.lon}&current_weather=true`;
+                const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+                if (!res.ok) throw new Error('Status ' + res.status);
+                const data = await res.json();
+                const current = data.current_weather;
+                const temp = current?.temperature ?? '?';
+                const wind = current?.windspeed ?? '?';
+                const code = current?.weathercode ?? -1;
+                const conditionMap = {
+                  0: 'صاف', 1: 'کمی ابری', 2: 'ابری', 3: 'ابری', 45: 'مه', 48: 'مه رقیق',
+                  51: 'نم‌نم باران', 53: 'نم‌نم باران', 55: 'نم‌نم باران',
+                  61: 'باران', 63: 'باران', 65: 'باران شدید', 71: 'برف', 73: 'برف', 75: 'برف سنگین',
+                  80: 'بارش پراکنده', 81: 'بارش', 82: 'بارش شدید', 95: 'طوفان', '*': 'نامشخص'
+                };
+                const condition = conditionMap[code] || conditionMap['*'];
+                weatherData.push({ city: city.name, temp, wind, condition });
+              } catch (e) {
+                console.error(`Weather ${city.name} error:`, e.message);
+                weatherData.push({ city: city.name, temp: '?', wind: '?', condition: 'نامشخص' });
+              }
+            }
+            return weatherData;
+          }
+
+          // ─── Emergency contacts ────────────────────────────
+          const emergencyLinks = [
+            { title: 'اورژانس', number: '115' },
+            { title: 'آتش‌نشانی', number: '125' },
+            { title: 'پلیس', number: '110' },
+            { title: 'هلال احمر', number: '112' },
+            { title: 'اورژانس اجتماعی', number: '123' },
+            { title: 'گزارش قطعی تلفن', number: '117' },
+            { title: 'پشتیبانی شاتل', number: '☎️ 021-91005000' },
+            { title: 'پشتیبانی آسیاتک', number: '☎️ 021-91009000' },
+            { title: 'پشتیبانی ایرانسل', number: '☎️ 09377000000' },
+            { title: 'پشتیبانی همراه اول', number: '☎️ 09990' }
+          ];
+
+          // ─── Build Markdown ────────────────────────────────
+          async function buildMarkdown() {
+            let md = `# 📊 خلاصه اطلاعات ضروری – ${TIMESTAMP}\n\n`;
+
+            // Currency & Gold via API
+            const prices = await fetchPricesFromAPI();
+            md += `## 💰 قیمت ارز و طلا (BrsApi.ir)\n\n`;
+            if (prices && !prices.error) {
+              md += `| مورد | قیمت (تومان) |\n|------|------|\n`;
+              for (const [item, price] of Object.entries(prices)) {
+                md += `| ${item} | ${price} |\n`;
+              }
+            } else {
+              md += `⚠️ دریافت نشد (${prices?.error || 'ممکن است سرویس در دسترس نباشد'})\n`;
+            }
+            md += '\n---\n\n';
+
+            // News
+            const headlines = await fetchRSSFeeds();
+            md += `## 📰 تیترهای خبری\n\n`;
+            for (const feed of headlines) {
+              md += `### ${feed.source}\n`;
+              for (const item of feed.items) {
+                md += `- ${item}\n`;
+              }
+              md += '\n';
+            }
+            md += '---\n\n';
+
+            // Weather
+            const weather = await fetchWeather();
+            md += `## 🌤️ وضعیت آب و هوا\n\n`;
+            md += `| شهر | دما (°C) | سرعت باد (km/h) | وضعیت |\n|------|----------|-----------------|--------|\n`;
+            for (const w of weather) {
+              md += `| ${w.city} | ${w.temp} | ${w.wind} | ${w.condition} |\n`;
+            }
+            md += '\n---\n\n';
+
+            // Emergency contacts
+            md += `## 🆘 ارتباطات ضروری\n\n`;
+            for (const item of emergencyLinks) {
+              md += `- **${item.title}**: ${item.number}\n`;
+            }
+            md += '\n---\n\n*به‌روزرسانی خودکار هر ۳۰ دقیقه — بدون نیاز به اینترنت کامل و فقط از طریق GitHub در دسترس است.*\n';
+
+            fs.writeFileSync(OUTPUT, md, 'utf8');
+            console.log('Daily info snapshot generated successfully.');
+          }
+
+          buildMarkdown().catch(err => {
+            console.error('Fatal error:', err);
+            process.exit(1);
+          });
+          ENDOFSCRIPT
+
+      - name: Run scraper
+        env:
+          BRS_API_KEY: ${{ secrets.BRS_API_KEY }}
+        run: node scrape-daily.js
+
+      - name: Commit and push daily-info.md
+        run: |
+          if [ ! -f "daily-info.md" ]; then
+            echo "daily-info.md not found, nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add daily-info.md
+          if git diff --staged --quiet; then
+            echo "No changes in daily-info.md"
+            exit 0
+          fi
+          git commit -m "Update daily info snapshot [skip ci]"
+          git pull --rebase
+          git push
