@@ -1,0 +1,15 @@
+//telegram.org/
+//telegram.org/css/bootstrap.min.css?3
+//telegram.org/css/font-roboto.css?1
+//telegram.org/css/telegram.css?249
+//telegram.org/dl?tme=66dcf80a848ee5289f_11406045096916435574
+//telegram.org/img/apple-touch-icon.png
+//telegram.org/img/favicon-16x16.png
+//telegram.org/img/favicon-32x32.png
+//telegram.org/img/favicon.ico
+//telegram.org/img/website_icon.svg?4
+//telegram.org/js/tgwallpaper.min.js?3
+/css/myriad.css
+/s/whitedns/578
+https://telegram.org/js/telegram-widget.js?23
+tg://resolve?domain=whitedns&post=578
