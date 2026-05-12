@@ -22,6 +22,11 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -93,15 +98,15 @@ jobs:
           mkdir -p "$FOLDER" "$MEDIA_FOLDER"
 
           echo "Downloading page HTML..."
-          curl -L -A "Mozilla/5.0" -o "$FOLDER/page.html" "$URL"
+          curl -L -A "Mozilla/5.0" -o "$FOLDER/page.html" "$URL" || echo "HTML download had issues, continuing..."
 
           echo "Taking screenshot..."
           node screenshot.js "$URL" "$FOLDER/screenshot.png" && SCREENSHOT_OK=true || SCREENSHOT_OK=false
 
-          grep -oP 'href="\K[^"]*' "$FOLDER/page.html" > "$FOLDER/all_links.txt"
-          grep -oP "href='\K[^']*" "$FOLDER/page.html" >> "$FOLDER/all_links.txt"
-          grep -oP 'src="\K[^"]*' "$FOLDER/page.html" >> "$FOLDER/all_links.txt"
-          grep -oP "src='\K[^']*" "$FOLDER/page.html" >> "$FOLDER/all_links.txt"
+          (grep -oP 'href="\K[^"]*' "$FOLDER/page.html" || true) > "$FOLDER/all_links.txt"
+          (grep -oP "href='\K[^']*" "$FOLDER/page.html" || true) >> "$FOLDER/all_links.txt"
+          (grep -oP 'src="\K[^"]*' "$FOLDER/page.html" || true) >> "$FOLDER/all_links.txt"
+          (grep -oP "src='\K[^']*" "$FOLDER/page.html" || true) >> "$FOLDER/all_links.txt"
           sort -u "$FOLDER/all_links.txt" -o "$FOLDER/all_links.txt"
 
           MEDIA_EXT="png|jpg|jpeg|gif|svg|webp|bmp|ico|mp3|wav|ogg|flac|aac|mp4|webm|avi|mov|mkv|pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|tar|gz|7z"
@@ -201,15 +206,23 @@ jobs:
 
       - name: Create zip archive of the timestamp folder
         run: |
-          cd pages/$DOMAIN/$SLUG
-          zip -r "$TIMESTAMP.zip" "$TIMESTAMP"
-          cd ../../..
+          if [ -d "pages/$DOMAIN/$SLUG/$TIMESTAMP" ]; then
+            cd pages/$DOMAIN/$SLUG
+            zip -r "$TIMESTAMP.zip" "$TIMESTAMP"
+            cd ../../..
+          else
+            echo "Timestamp folder not found, skipping zip"
+          fi
 
       - name: Commit and push
         run: |
+          if [ ! -d "pages" ] && [ ! -f "browse.md" ]; then
+            echo "Nothing to commit (no pages folder or browse.md)"
+            exit 0
+          fi
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git add pages/ browse.md
+          git add pages/ browse.md 2>/dev/null || true
           if git diff --staged --quiet; then
             echo "Nothing to commit"
             exit 0
