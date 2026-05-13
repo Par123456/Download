@@ -1,0 +1,203 @@
+name: 🔍 YouTube Search
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'Search keyword'
+        required: true
+        type: string
+
+concurrency:
+  group: youtube-search-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm install cheerio
+
+      - name: Create YouTube search script
+        run: |
+          cat > youtube-search.js << 'ENDOFSCRIPT'
+          const fs = require('fs');
+          const cheerio = require('cheerio');
+
+          const query = process.argv[2];
+          if (!query) {
+            console.error('No search query provided');
+            process.exit(1);
+          }
+
+          const OUTPUT = 'youtube-results.md';
+          const TIMESTAMP = new Date().toISOString().replace('T', ' ').slice(0, 19);
+          const SEARCH_URL = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+
+          async function searchYouTube() {
+            try {
+              const res = await fetch(SEARCH_URL, {
+                signal: AbortSignal.timeout(15000),
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                  'Accept-Language': 'en-US,en;q=0.9'
+                }
+              });
+
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              const html = await res.text();
+
+              let md = `# 🔍 نتایج جستجوی یوتیوب: "${query}"\n\n`;
+              md += `**تاریخ:** ${TIMESTAMP}\n\n`;
+              md += `---\n\n`;
+
+              // Extract initial data from ytInitialData JSON in the page
+              const jsonMatch = html.match(/var ytInitialData\s*=\s*({.+?});/);
+              if (!jsonMatch) {
+                // Fallback: try regex on rendered HTML
+                const videoRegex = /"videoId":"([^"]+)"/g;
+                const titleRegex = /"title":\{"runs":\[\{"text":"([^"]+)"\}/g;
+                const channelRegex = /"ownerText":\{"runs":\[\{"text":"([^"]+)"[^}]*"navigationEndpoint":\{"browseEndpoint":\{"browseId":"([^"]+)"\}/g;
+
+                const videos = [];
+                let match;
+                const videoIds = [];
+                const titles = [];
+                const channels = [];
+
+                while ((match = videoRegex.exec(html)) !== null) {
+                  videoIds.push(match[1]);
+                }
+                while ((match = titleRegex.exec(html)) !== null) {
+                  titles.push(match[1]);
+                }
+                while ((match = channelRegex.exec(html)) !== null) {
+                  channels.push({ name: match[1], id: match[2] });
+                }
+
+                const limit = Math.min(10, videoIds.length, titles.length);
+                for (let i = 0; i < limit; i++) {
+                  const videoId = videoIds[i];
+                  const title = titles[i] || 'بدون عنوان';
+                  const channel = channels[i]?.name || 'نامشخص';
+                  const link = `https://www.youtube.com/watch?v=${videoId}`;
+                  const thumbnail = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+
+                  videos.push({ title, channel, link, thumbnail, videoId });
+                }
+
+                if (videos.length === 0) {
+                  md += `⚠️ هیچ نتیجه‌ای یافت نشد.\n`;
+                } else {
+                  let count = 1;
+                  for (const video of videos) {
+                    md += `## ${count}. ${video.title}\n\n`;
+                    md += `![${video.title}](${video.thumbnail})\n\n`;
+                    md += `| ویژگی | مقدار |\n|--------|-------|\n`;
+                    md += `| **کانال** | ${video.channel} |\n`;
+                    md += `| **لینک ویدیو** | [${video.link}](${video.link}) |\n`;
+                    md += `| **ویدیو ID** | \`${video.videoId}\` |\n\n`;
+                    md += `---\n\n`;
+                    count++;
+                  }
+                }
+
+                fs.writeFileSync(OUTPUT, md, 'utf8');
+                console.log(`YouTube search results saved to ${OUTPUT}`);
+                return;
+              }
+
+              // Parse using ytInitialData JSON
+              const data = JSON.parse(jsonMatch[1]);
+              const contents = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents;
+
+              if (!contents) {
+                md += `⚠️ ساختار نتایج تغییر کرده است.\n`;
+                fs.writeFileSync(OUTPUT, md, 'utf8');
+                return;
+              }
+
+              const videos = [];
+              for (const section of contents) {
+                const items = section?.itemSectionRenderer?.contents || [];
+                for (const item of items) {
+                  const videoRenderer = item?.videoRenderer;
+                  if (!videoRenderer) continue;
+                  const title = videoRenderer?.title?.runs?.[0]?.text || 'بدون عنوان';
+                  const videoId = videoRenderer?.videoId || '';
+                  const channel = videoRenderer?.ownerText?.runs?.[0]?.text || 'نامشخص';
+                  const link = `https://www.youtube.com/watch?v=${videoId}`;
+                  const thumbnail = videoRenderer?.thumbnail?.thumbnails?.[0]?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+
+                  videos.push({ title, channel, link, thumbnail, videoId });
+                  if (videos.length >= 10) break;
+                }
+                if (videos.length >= 10) break;
+              }
+
+              let count = 1;
+              for (const video of videos) {
+                md += `## ${count}. ${video.title}\n\n`;
+                md += `![${video.title}](${video.thumbnail})\n\n`;
+                md += `| ویژگی | مقدار |\n|--------|-------|\n`;
+                md += `| **کانال** | ${video.channel} |\n`;
+                md += `| **لینک ویدیو** | [${video.link}](${video.link}) |\n`;
+                md += `| **ویدیو ID** | \`${video.videoId}\` |\n\n`;
+                md += `---\n\n`;
+                count++;
+              }
+
+              md += `\n*نتایج جستجوی خودکار با GitHub Actions*\n`;
+              fs.writeFileSync(OUTPUT, md, 'utf8');
+              console.log(`Found ${videos.length} videos. Results saved to ${OUTPUT}`);
+
+            } catch (err) {
+              console.error('Search error:', err.message);
+              let errorMd = `# 🔍 خطا در جستجوی یوتیوب\n\n`;
+              errorMd += `**کلمه جستجو:** ${query}\n`;
+              errorMd += `**تاریخ:** ${TIMESTAMP}\n\n`;
+              errorMd += `**خطا:** ${err.message}\n\n`;
+              fs.writeFileSync(OUTPUT, errorMd, 'utf8');
+              process.exit(1);
+            }
+          }
+
+          searchYouTube();
+          ENDOFSCRIPT
+
+      - name: Run YouTube search
+        env:
+          SEARCH_QUERY: ${{ github.event.inputs.query }}
+        run: node youtube-search.js "$SEARCH_QUERY"
+
+      - name: Commit and push results
+        run: |
+          if [ ! -f "youtube-results.md" ]; then
+            echo "youtube-results.md not found"
+            exit 0
+          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add youtube-results.md
+          if git diff --staged --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git commit -m "Update YouTube search results [skip ci]"
+          git pull --rebase
+          git push
