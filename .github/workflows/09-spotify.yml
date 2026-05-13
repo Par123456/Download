@@ -1,0 +1,247 @@
+name: 🎵 Music Downloader by Name
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'Song name / artist'
+        required: true
+        type: string
+      quality:
+        description: 'Audio quality'
+        required: false
+        default: '320k'
+        type: choice
+        options:
+          - 320k
+          - 256k
+          - 192k
+          - 128k
+
+concurrency:
+  group: music-download-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl zip ffmpeg python3 python3-pip
+
+      - name: Install yt-dlp
+        run: |
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+
+      - name: Install Node dependencies
+        run: npm init -y && npm install cheerio
+
+      - name: Create YouTube search script (first video link)
+        run: |
+          cat > find-first-video.js << 'ENDOFSCRIPT'
+          const cheerio = require('cheerio');
+          const query = process.argv[2];
+          if (!query) { console.error('No query'); process.exit(1); }
+
+          const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+          (async () => {
+            try {
+              const res = await fetch(searchUrl, {
+                signal: AbortSignal.timeout(15000),
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                  'Accept-Language': 'en-US,en;q=0.9'
+                }
+              });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              const html = await res.text();
+
+              let videoId = null;
+              let title = 'Unknown';
+
+              // 1. Try ytInitialData JSON
+              const jsonMatch = html.match(/var ytInitialData\s*=\s*({.+?});/);
+              if (jsonMatch) {
+                const data = JSON.parse(jsonMatch[1]);
+                const contents = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents;
+                if (contents) {
+                  for (const section of contents) {
+                    const items = section?.itemSectionRenderer?.contents || [];
+                    for (const item of items) {
+                      const vr = item?.videoRenderer;
+                      if (vr && vr.videoId) {
+                        videoId = vr.videoId;
+                        title = vr?.title?.runs?.[0]?.text || 'Unknown';
+                        break;
+                      }
+                    }
+                    if (videoId) break;
+                  }
+                }
+              }
+
+              // 2. Fallback regex
+              if (!videoId) {
+                const match = html.match(/"videoId":"([^"]+)"/);
+                if (match) videoId = match[1];
+                const titleMatch = html.match(/"title":\{"runs":\[\{"text":"([^"]+)"\}/);
+                if (titleMatch) title = titleMatch[1];
+              }
+
+              if (!videoId) throw new Error('No video found');
+
+              const link = `https://www.youtube.com/watch?v=${videoId}`;
+              console.log(link);
+            } catch (err) {
+              console.error('Search error:', err.message);
+              process.exit(1);
+            }
+          })();
+          ENDOFSCRIPT
+
+      - name: Find video link and download audio
+        env:
+          SEARCH_QUERY: ${{ github.event.inputs.query }}
+          AUDIO_QUALITY: ${{ github.event.inputs.quality }}
+        run: |
+          echo "Searching for: $SEARCH_QUERY"
+          VIDEO_URL=$(node find-first-video.js "$SEARCH_QUERY")
+          if [ -z "$VIDEO_URL" ]; then
+            echo "No video found, aborting."
+            exit 1
+          fi
+          echo "Found video: $VIDEO_URL"
+
+          QUALITY="$AUDIO_QUALITY"
+          BITRATE="${QUALITY:-320k}"
+
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          FOLDER="music-downloads/$TIMESTAMP"
+          mkdir -p "$FOLDER"
+
+          echo "Downloading audio (bitrate $BITRATE)..."
+          yt-dlp \
+            --extract-audio \
+            --audio-format mp3 \
+            --audio-quality 0 \
+            --embed-thumbnail \
+            --add-metadata \
+            --output "$FOLDER/%(title)s.%(ext)s" \
+            --no-playlist \
+            --retries 5 \
+            --fragment-retries 5 \
+            "$VIDEO_URL" || { echo "Download failed"; exit 1; }
+
+          echo "Download completed. Files:"
+          ls -la "$FOLDER"
+
+          # Split if needed
+          SPLIT_MB=90
+          SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
+          TOTAL_SIZE=$(du -sb "$FOLDER" | cut -f1)
+          if [ "$TOTAL_SIZE" -gt "$SPLIT_BYTES" ]; then
+            echo "Size ($TOTAL_SIZE bytes) > ${SPLIT_MB}MB, creating zip archive..."
+            cd "$FOLDER"
+            if [ "$TOTAL_SIZE" -gt 1900000000 ]; then
+              zip -0 -s "${SPLIT_MB}m" "archive.zip" *
+              rm -f -- *
+            else
+              zip -9 "archive.zip" *
+              rm -f -- *.mp3 *.webm *.m4a 2>/dev/null || true
+            fi
+            cd ../..
+          fi
+
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          echo "VIDEO_URL=$VIDEO_URL" >> $GITHUB_ENV
+
+      - name: Create README for downloaded music
+        run: |
+          TIMESTAMP="$TIMESTAMP"
+          FOLDER="music-downloads/$TIMESTAMP"
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          BRANCH="${GITHUB_REF_NAME}"
+          VIDEO_URL="$VIDEO_URL"
+
+          {
+            echo "# 🎵 دانلود موزیک"
+            echo ""
+            echo "**تاریخ:** $(date '+%Y-%m-%d %H:%M:%S')"
+            echo ""
+            echo "**جستجو:** ${{ github.event.inputs.query }}"
+            echo ""
+            echo "**منبع:** [${VIDEO_URL}](${VIDEO_URL})"
+            echo ""
+            echo "**کیفیت:** ${{ github.event.inputs.quality }}"
+            echo ""
+            echo "---"
+            echo ""
+            echo "## فایل‌های دانلود شده"
+            echo ""
+            echo "| نام فایل | حجم | لینک |"
+            echo "|----------|------|------|"
+            for FILE in "$FOLDER"/*; do
+              if [ -f "$FILE" ]; then
+                BASENAME=$(basename "$FILE")
+                SIZE=$(stat -c%s "$FILE")
+                SIZE_MB=$(( SIZE / 1024 / 1024 ))
+                ENCODED_FILE=$(echo "$BASENAME" | sed 's/ /%20/g')
+                ENCODED_FOLDER=$(echo "$TIMESTAMP" | sed 's/ /%20/g')
+                RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/music-downloads/${ENCODED_FOLDER}/${ENCODED_FILE}"
+                echo "| \`$BASENAME\` | ${SIZE_MB} MB | [دانلود](${RAW_LINK}) |"
+              fi
+            done
+            echo ""
+            echo "---"
+            echo "*دانلود خودکار با GitHub Actions و yt-dlp*"
+          } > "$FOLDER/README.md"
+
+      - name: Update main README
+        run: |
+          MAIN_README="music-downloads/README.md"
+          mkdir -p music-downloads
+
+          {
+            echo "# 🎵 دانلودهای موزیک"
+            echo ""
+            echo "| تاریخ | پوشه |"
+            echo "|--------|------|"
+            for DIR in music-downloads/*/; do
+              if [ -d "$DIR" ] && [ "${DIR:0:1}" != "." ]; then
+                DIRNAME=$(basename "$DIR")
+                echo "| $DIRNAME | [مشاهده](./$DIRNAME/) |"
+              fi
+            done
+            echo ""
+            echo "---"
+            echo "*دانلود خودکار با GitHub Actions و yt-dlp*"
+          } > "$MAIN_README"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add music-downloads/
+          if git diff --staged --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+          git commit -m "Add music download: ${{ github.event.inputs.query }} [skip ci]"
+          git pull --rebase
+          git push
