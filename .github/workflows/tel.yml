@@ -1,0 +1,337 @@
+name: ⬇️ Telegram Channel Scraper (No API)
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Channel username (e.g., durov)'
+        required: true
+        type: string
+      count:
+        description: 'Number of last posts to download'
+        required: true
+        default: '5'
+        type: string
+
+jobs:
+  scrape-telegram:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Python & dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip
+          pip3 install requests beautifulsoup4 html2text
+
+      - name: Scrape Telegram Channel (No API Required)
+        env:
+          CHANNEL: ${{ github.event.inputs.channel }}
+          COUNT: ${{ github.event.inputs.count }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          python3 << 'PYEOF'
+          import os, sys, re, json, time, shutil
+          from datetime import datetime
+          from pathlib import Path
+          import requests
+          from bs4 import BeautifulSoup
+          import html2text
+
+          channel = os.environ['CHANNEL'].strip().replace('@', '').replace('https://t.me/', '').replace('https://t.me/s/', '').strip('/')
+          count = int(os.environ['COUNT'])
+          repo_owner = os.environ['REPO_OWNER']
+          repo_name = os.environ['REPO_NAME']
+          branch = os.environ['BRANCH']
+
+          BASE_URL = f"https://t.me/s/{channel}"
+          DOWNLOAD_DIR = Path('downloads')
+          DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+
+          print(f"🔍 Fetching posts from: {BASE_URL}")
+          print(f"📊 Requested: {count} posts")
+
+          messages_data = []
+          last_id = None
+          remaining = count
+
+          # Pagination loop
+          while remaining > 0:
+              url = BASE_URL
+              if last_id:
+                  url += f"?before={last_id}"
+              print(f"   Fetching: {url}")
+
+              resp = requests.get(url, headers=headers, timeout=30)
+              if resp.status_code != 200:
+                  print(f"❌ HTTP {resp.status_code} - Stopping")
+                  break
+
+              soup = BeautifulSoup(resp.text, 'html.parser')
+              message_wraps = soup.select('.tgme_widget_message_wrap')
+              if not message_wraps:
+                  print("⚠️ No messages found (channel may be private or not exist)")
+                  break
+
+              for wrap in message_wraps:
+                  if remaining <= 0:
+                      break
+
+                  msg_widget = wrap.select_one('.tgme_widget_message')
+                  if not msg_widget:
+                      continue
+
+                  # Extract message ID from data-post attribute
+                  data_post = msg_widget.get('data-post', '')
+                  msg_id = None
+                  if data_post:
+                      parts = data_post.split('/')
+                      if len(parts) == 2:
+                          msg_id = parts[1]
+
+                  if not msg_id:
+                      continue
+
+                  last_id = int(msg_id)
+
+                  # Extract text
+                  text_div = msg_widget.select_one('.tgme_widget_message_text')
+                  text = ''
+                  if text_div:
+                      converter = html2text.HTML2Text()
+                      converter.ignore_links = False
+                      converter.ignore_images = True
+                      text = converter.handle(str(text_div)).strip()
+
+                  # Extract date
+                  date_tag = msg_widget.select_one('.tgme_widget_message_date time')
+                  if date_tag and date_tag.has_attr('datetime'):
+                      post_date = date_tag['datetime']
+                  else:
+                      post_date = datetime.utcnow().isoformat()
+
+                  # Extract views
+                  views_span = msg_widget.select_one('.tgme_widget_message_views')
+                  views = views_span.text.strip() if views_span else 'N/A'
+
+                  # Extract media (photos, videos, documents)
+                  media_links = []
+                  # Photos
+                  for photo in msg_widget.select('.tgme_widget_message_photo_wrap'):
+                      style = photo.get('style', '')
+                      url_match = re.search(r"url\(['\"]?(.*?)['\"]?\)", style)
+                      if url_match:
+                          media_links.append(url_match.group(1))
+
+                  # Videos
+                  for video in msg_widget.select('.tgme_widget_message_video'):
+                      if video.has_attr('src'):
+                          media_links.append(video['src'])
+                      elif video.has_attr('data-src'):
+                          media_links.append(video['data-src'])
+
+                  # Documents
+                  for doc in msg_widget.select('.tgme_widget_message_document'):
+                      doc_link = doc.select_one('a')
+                      if doc_link and doc_link.has_attr('href'):
+                          media_links.append(doc_link['href'])
+
+                  # Detect media type
+                  has_photo = bool(msg_widget.select_one('.tgme_widget_message_photo_wrap'))
+                  has_video = bool(msg_widget.select_one('.tgme_widget_message_video'))
+                  has_document = bool(msg_widget.select_one('.tgme_widget_message_document'))
+                  has_voice = bool(msg_widget.select_one('.tgme_widget_message_voice'))
+                  has_audio = bool(msg_widget.select_one('.tgme_widget_message_audio'))
+
+                  messages_data.append({
+                      'id': msg_id,
+                      'date': post_date,
+                      'text': text,
+                      'views': views,
+                      'media_links': media_links,
+                      'has_photo': has_photo,
+                      'has_video': has_video,
+                      'has_document': has_document,
+                      'has_voice': has_voice,
+                      'has_audio': has_audio
+                  })
+
+                  remaining -= 1
+
+              # If we got fewer wraps than expected, we've reached the end
+              if len(message_wraps) < 20:
+                  break
+
+              time.sleep(0.5)
+
+          print(f"\n✅ Retrieved {len(messages_data)} posts")
+
+          # Create folders and download media
+          post_folders = []
+
+          for msg in messages_data:
+              date_str = msg['date'].replace(':', '-').replace('T', '_')[:19]
+              folder_name = f"post_{msg['id']}_{date_str}"
+              folder_name = re.sub(r'[<>:"/\\|?*]', '_', folder_name)
+              folder_path = DOWNLOAD_DIR / folder_name
+              folder_path.mkdir(exist_ok=True)
+              post_folders.append(folder_name)
+
+              print(f"📝 Processing post {msg['id']} → {folder_name}")
+
+              # Save README.md
+              readme_lines = [
+                  f"# Telegram Post {msg['id']}",
+                  f"",
+                  f"| Property | Value |",
+                  f"|----------|-------|",
+                  f"| **Date** | {msg['date']} |",
+                  f"| **Channel** | @{channel} |",
+                  f"| **Message ID** | {msg['id']} |",
+                  f"| **Views** | {msg['views']} |",
+                  f"",
+              ]
+
+              if msg['text']:
+                  readme_lines.append("## 📝 Message Text")
+                  readme_lines.append("")
+                  readme_lines.append(msg['text'])
+                  readme_lines.append("")
+
+              # Media info
+              media_types = []
+              if msg['has_photo']: media_types.append('🖼️ Photo')
+              if msg['has_video']: media_types.append('🎬 Video')
+              if msg['has_document']: media_types.append('📄 Document')
+              if msg['has_voice']: media_types.append('🎤 Voice')
+              if msg['has_audio']: media_types.append('🎵 Audio')
+
+              if media_types:
+                  readme_lines.append("## 📎 Attachments")
+                  readme_lines.append("")
+                  for mt in media_types:
+                      readme_lines.append(f"- {mt}")
+                  readme_lines.append("")
+
+              readme_lines.append("---")
+              readme_lines.append("")
+              readme_lines.append("*Scraped by [AnishtayiN](https://t.me/AnishtayiN) using public web preview*")
+
+              readme_path = folder_path / "README.md"
+              readme_path.write_text("\n".join(readme_lines), encoding='utf-8')
+
+              # Download media files
+              for i, media_url in enumerate(msg['media_links']):
+                  try:
+                      if media_url.startswith('/'):
+                          media_url = f"https://t.me{media_url}"
+
+                      # Determine extension
+                      if '.jpg' in media_url or '.jpeg' in media_url:
+                          ext = '.jpg'
+                      elif '.png' in media_url:
+                          ext = '.png'
+                      elif '.mp4' in media_url:
+                          ext = '.mp4'
+                      elif '.webp' in media_url:
+                          ext = '.webp'
+                      elif '.gif' in media_url:
+                          ext = '.gif'
+                      else:
+                          ext = '.dat'
+
+                      media_filename = f"media_{msg['id']}_{i+1}{ext}"
+                      media_path = folder_path / media_filename
+
+                      print(f"   ⬇️ Downloading {media_url[:60]}...")
+                      media_resp = requests.get(media_url, headers=headers, timeout=60)
+                      if media_resp.status_code == 200:
+                          media_path.write_bytes(media_resp.content)
+                          print(f"   ✅ Saved: {media_filename}")
+                      else:
+                          print(f"   ⚠️ Failed (HTTP {media_resp.status_code})")
+                  except Exception as e:
+                      print(f"   ❌ Error: {e}")
+
+              time.sleep(0.3)
+
+          # Create downloads/README.md
+          list_md = DOWNLOAD_DIR / "README.md"
+          lines = ["# 📥 Downloaded Telegram Posts", ""]
+          for folder in post_folders:
+              folder_encoded = folder.replace(' ', '%20')
+              link = f"https://github.com/{repo_owner}/{repo_name}/tree/{branch}/downloads/{folder_encoded}"
+              lines.append(f"- [{folder}]({link})")
+          lines.append("")
+          lines.append("---")
+          lines.append("*Scraped via public web preview by [AnishtayiN](https://t.me/AnishtayiN)*")
+          list_md.write_text("\n".join(lines), encoding='utf-8')
+
+          # Update root README.md
+          root_readme = Path("README.md")
+          if not root_readme.exists():
+              root_readme.write_text("# AnishtayiN Telegram Scraper\n\n", encoding='utf-8')
+
+          content = root_readme.read_text(encoding='utf-8')
+          section_title = "📥 آخرین پست‌های دانلود شده از تلگرام"
+
+          # Remove old section
+          marker = f"## {section_title}"
+          if marker in content:
+              idx = content.index(marker)
+              rest = content[idx:]
+              end_marker = rest.find("---", len(marker))
+              if end_marker != -1:
+                  rest = rest[end_marker + 3:]
+              else:
+                  rest = ""
+              content = content[:idx] + rest
+
+          # Add new section
+          links = "\n".join(
+              f"{i+1}. [{f}](https://github.com/{repo_owner}/{repo_name}/tree/{branch}/downloads/{f.replace(' ', '%20')})"
+              for i, f in enumerate(post_folders)
+          )
+
+          new_section = f"""## {section_title}
+
+          {links}
+
+          ---
+          """
+
+          content = content.rstrip() + "\n\n" + new_section
+          root_readme.write_text(content, encoding='utf-8')
+
+          print(f"\n🎉 Completed! {len(post_folders)} posts saved to downloads/")
+          PYEOF
+
+      - name: Commit & Push
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+          git add README.md downloads/
+
+          if [ -z "$(git diff --cached --name-only)" ]; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "[AnishtayiN] Scraped Telegram posts [skip ci]"
+          git pull --rebase origin "$BRANCH" || true
+          git push origin HEAD:"$BRANCH"
