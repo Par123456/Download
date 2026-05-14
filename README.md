@@ -25,10 +25,6 @@
 
 ## 📥 آخرین پست‌های دانلود شده از تلگرام
 
-1. [2026-05-12_051610_2314](https://github.com/Par123456/Download/tree/main/downloads/2026-05-12_051610_2314)
-2. [2026-05-12_052545_2315](https://github.com/Par123456/Download/tree/main/downloads/2026-05-12_052545_2315)
-3. [2026-05-12_065640_2316](https://github.com/Par123456/Download/tree/main/downloads/2026-05-12_065640_2316)
-4. [2026-05-12_130510_2318](https://github.com/Par123456/Download/tree/main/downloads/2026-05-12_130510_2318)
-5. [2026-05-12_133420_2319](https://github.com/Par123456/Download/tree/main/downloads/2026-05-12_133420_2319)
+- [@ircfspace](https://github.com/Par123456/Download/tree/main/downloads/tel/ircfspace) ← 🕒 آخرین به‌روزرسانی: 2026/05/14 16:55 UTC | [چت](https://github.com/Par123456/Download/tree/main/downloads/tel/ircfspace/chat.html)
 
 ---

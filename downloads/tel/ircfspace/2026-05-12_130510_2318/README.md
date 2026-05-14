@@ -25,7 +25,7 @@ _**👉**_
 
 | نوع | نام فایل | حجم/وضعیت |
 |-----|----------|-----------|
-| photo | [photo_1.jpg](./photo_1.jpg) | 52 KB |
+| photo | — | HTTPSConnectionPool(host='cdn1.telesco.pe', port=443): Max retries exceeded with |
 
 ---
-*اسکرپ شده با افتخار توسط [AnishtayiN](https://t.me/AnishtayiN)*
+*اسکرپ شده توسط AnishtayiN*
