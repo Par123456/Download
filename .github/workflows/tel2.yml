@@ -1,4 +1,4 @@
-name: 📥 Telegram Scraper (No API)
+name: 📥 Telegram Scraper
 
 on:
   workflow_dispatch:
