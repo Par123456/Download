@@ -36,7 +36,7 @@ jobs:
           sudo apt-get update -qq > /dev/null 2>&1
           sudo apt-get install -y bc curl dnsutils > /dev/null 2>&1
           
-          # دانلود dnspyre با دنبال کردن redirect (حل مشکل exit 8)
+          # دانلود dnspyre (با دنبال کردن redirect)
           echo "⬇️ دانلود dnspyre..."
           wget -qL https://github.com/Tantalor93/dnspyre/releases/download/v1.3.2/dnspyre-linux-amd64 -O /tmp/dnspyre || \
           curl -sL https://github.com/Tantalor93/dnspyre/releases/download/v1.3.2/dnspyre-linux-amd64 -o /tmp/dnspyre
@@ -76,15 +76,15 @@ jobs:
           for DNS_IP in $DNS_IPS; do
             echo "  ➡️ تست $DNS_IP"
             
-            # تست دسترسی اولیه پورت 53 UDP
+            # تست دسترسی پورت 53 UDP (با timeout کوتاه)
             if timeout 2 bash -c "echo > /dev/udp/$DNS_IP/53" 2>/dev/null; then
               PORT_STATUS="باز"
             else
               PORT_STATUS="بسته/فیلتر"
             fi
             
-            # اجرای بنچمارک با dnspyre (حالت TCP برای اطمینان از عبور)
-            sudo dnspyre -s $DNS_IP --tcp -n $TEST_COUNT $TEST_DOMAINS > /tmp/dns_result.txt 2>&1
+            # اجرای بنچمارک (بدون sudo – رفع خطای 127)
+            dnspyre -s $DNS_IP --tcp -n $TEST_COUNT $TEST_DOMAINS > /tmp/dns_result.txt 2>&1
             
             # استخراج میانگین تأخیر
             AVG_LATENCY=$(grep "mean:" /tmp/dns_result.txt | awk '{print $2}' | tail -1)
@@ -92,7 +92,7 @@ jobs:
               AVG_LATENCY="N/A"
             fi
             
-            # محاسبه درصد پاسخ‌های موفق
+            # محاسبه درصد موفقیت
             SUCCESS_COUNT=$(grep "NOERROR" /tmp/dns_result.txt | grep -oP '\d+' | head -1)
             if [ -z "$SUCCESS_COUNT" ]; then
               SUCCESS_COUNT="0"
@@ -103,7 +103,7 @@ jobs:
             echo "| $counter | $DNS_IP | ${AVG_LATENCY} | $PORT_STATUS | ${ACCURACY}% |" >> $REPORT_FILE
             counter=$((counter + 1))
             
-            # ذخیره خروجی کامل برای تحلیل
+            # ذخیره لاگ کامل
             cp /tmp/dns_result.txt "results/${DNS_IP//./_}.log"
             echo "  ✅ تست $DNS_IP کامل شد (تأخیر: $AVG_LATENCY)"
           done
@@ -122,7 +122,7 @@ jobs:
           
           echo ""
           echo "💡 پیشنهادات برای کاربران ایران:"
-          echo "  - از DNSهای عمومی بین‌المللی مثل 8.8.8.8 در ایران استفاده نکنید (فیلتر هستند)."
+          echo "  - از DNSهای عمومی بین‌المللی (مثل 8.8.8.8) در ایران استفاده نکنید (فیلتر هستند)."
           echo "  - DNSهای ایرانی مثل شکن (178.22.122.100) یا بگذر (185.55.226.26) گزینه‌های بهتری هستند."
           echo "  - ترکیب DNS-over-HTTPS با یک پروکسی معتبر توصیه می‌شود."
 
