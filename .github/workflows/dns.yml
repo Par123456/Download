@@ -36,8 +36,16 @@ jobs:
           sudo apt-get update -qq > /dev/null 2>&1
           sudo apt-get install -y bc curl dnsutils > /dev/null 2>&1
           
-          # نصب dnspyre (ابزار بنچمارک حرفه‌ای)
-          wget -q https://github.com/Tantalor93/dnspyre/releases/download/v1.3.2/dnspyre-linux-amd64 -O /tmp/dnspyre
+          # دانلود dnspyre با دنبال کردن redirect (حل مشکل exit 8)
+          echo "⬇️ دانلود dnspyre..."
+          wget -qL https://github.com/Tantalor93/dnspyre/releases/download/v1.3.2/dnspyre-linux-amd64 -O /tmp/dnspyre || \
+          curl -sL https://github.com/Tantalor93/dnspyre/releases/download/v1.3.2/dnspyre-linux-amd64 -o /tmp/dnspyre
+          
+          if [ ! -s /tmp/dnspyre ]; then
+            echo "❌ دانلود dnspyre ناموفق بود – خارج می‌شویم"
+            exit 1
+          fi
+          
           chmod +x /tmp/dnspyre
           sudo mv /tmp/dnspyre /usr/local/bin/dnspyre
           
@@ -68,14 +76,14 @@ jobs:
           for DNS_IP in $DNS_IPS; do
             echo "  ➡️ تست $DNS_IP"
             
-            # تست دسترسی اولیه
+            # تست دسترسی اولیه پورت 53 UDP
             if timeout 2 bash -c "echo > /dev/udp/$DNS_IP/53" 2>/dev/null; then
               PORT_STATUS="باز"
             else
               PORT_STATUS="بسته/فیلتر"
             fi
             
-            # بنچمارک با dnspyre
+            # اجرای بنچمارک با dnspyre (حالت TCP برای اطمینان از عبور)
             sudo dnspyre -s $DNS_IP --tcp -n $TEST_COUNT $TEST_DOMAINS > /tmp/dns_result.txt 2>&1
             
             # استخراج میانگین تأخیر
@@ -84,7 +92,7 @@ jobs:
               AVG_LATENCY="N/A"
             fi
             
-            # بررسی دقت پاسخ‌ها
+            # محاسبه درصد پاسخ‌های موفق
             SUCCESS_COUNT=$(grep "NOERROR" /tmp/dns_result.txt | grep -oP '\d+' | head -1)
             if [ -z "$SUCCESS_COUNT" ]; then
               SUCCESS_COUNT="0"
@@ -112,7 +120,6 @@ jobs:
           echo "📈 رتبه‌بندی DNSها بر اساس سرعت:"
           grep "|" $REPORT_FILE | grep -v "ردیف" | grep -v "\-\-\-" | sort -t'|' -k3
           
-          # پیشنهاد DNS برای ایران
           echo ""
           echo "💡 پیشنهادات برای کاربران ایران:"
           echo "  - از DNSهای عمومی بین‌المللی مثل 8.8.8.8 در ایران استفاده نکنید (فیلتر هستند)."
@@ -120,6 +127,7 @@ jobs:
           echo "  - ترکیب DNS-over-HTTPS با یک پروکسی معتبر توصیه می‌شود."
 
       - name: commit گزارش‌ها
+        if: always()
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
