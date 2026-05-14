@@ -17,22 +17,21 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # 👈 برای push کافیست
-
+      contents: write
     steps:
-      - name: Checkout repository
+      - name: دریافت کد
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0        # همه تاریخچه را می‌گیریم (برای pull بی‌خطا)
+          fetch-depth: 0
 
-      - name: Setup Python & dependencies
+      - name: نصب نیازمندی‌ها
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y python3 python3-pip
           pip3 install requests beautifulsoup4 html2text
 
-      - name: Scrape Telegram and download media
+      - name: اسکرپ و دانلود پست‌های تلگرام
         env:
           CHANNEL: ${{ github.event.inputs.channel }}
           COUNT: ${{ github.event.inputs.count }}
@@ -40,187 +39,251 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
           BRANCH: ${{ github.ref_name }}
         run: |
-          python3 << 'PYEOF'
-          import os, sys, re, time
-          from datetime import datetime
+          python3 <<'PYEOF'
+          import os, sys, re, time, traceback
+          from datetime import datetime, timezone
           from pathlib import Path
           import requests
           from bs4 import BeautifulSoup
           import html2text
 
-          # ─── پیکربندی ───
-          channel = os.environ['CHANNEL'].strip().replace('@','').replace('https://t.me/s/','').replace('https://t.me/','').rstrip('/')
-          count = int(os.environ['COUNT'])
-          repo_owner = os.environ['REPO_OWNER']
-          repo_name = os.environ['REPO_NAME']
-          branch = os.environ['BRANCH']
+          def main():
+              try:
+                  channel = os.environ['CHANNEL'].strip().replace('@','').replace('https://t.me/s/','').replace('https://t.me/','').rstrip('/')
+                  count = int(os.environ['COUNT'])
+                  repo_owner = os.environ['REPO_OWNER']
+                  repo_name = os.environ['REPO_NAME']
+                  branch = os.environ['BRANCH']
 
-          BASE_URL = f"https://t.me/s/{channel}"
-          DOWNLOAD_DIR = Path('downloads')
-          DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                  BASE_URL = f"https://t.me/s/{channel}"
+                  DOWNLOAD_DIR = Path('downloads')
+                  DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-          HEADERS = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          }
+                  HEADERS = {
+                      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                  }
 
-          print(f"📡 اسکن کانال @{channel} | تعداد: {count}")
+                  print(f"📡 کانال: @{channel} | تعداد درخواستی: {count}")
 
-          messages = []
-          last_id = None
-          need = count
+                  messages = []
+                  last_id = None
+                  need = count
 
-          while need > 0:
-              url = BASE_URL if not last_id else f"{BASE_URL}?before={last_id}"
-              resp = requests.get(url, headers=HEADERS, timeout=25)
-              if resp.status_code != 200:
-                  print(f"⚠️ خطای HTTP {resp.status_code}")
-                  break
+                  while need > 0:
+                      url = BASE_URL if not last_id else f"{BASE_URL}?before={last_id}"
+                      print(f"   🔗 دریافت: {url}")
+                      resp = requests.get(url, headers=HEADERS, timeout=20)
+                      if resp.status_code != 200:
+                          print(f"   ⚠️ HTTP {resp.status_code} - توقف")
+                          break
 
-              soup = BeautifulSoup(resp.text, 'html.parser')
-              wraps = soup.select('.tgme_widget_message_wrap')
-              if not wraps:
-                  print("🚫 هیچ پستی یافت نشد")
-                  break
+                      soup = BeautifulSoup(resp.text, 'html.parser')
+                      wraps = soup.select('.tgme_widget_message_wrap')
+                      if not wraps:
+                          print("   🚫 هیچ پستی وجود ندارد (کانال خصوصی یا نامعتبر)")
+                          break
 
-              for wrap in wraps:
-                  if need <= 0: break
-                  msg = wrap.select_one('.tgme_widget_message')
-                  if not msg: continue
+                      for wrap in wraps:
+                          if need <= 0:
+                              break
+                          msg = wrap.select_one('.tgme_widget_message')
+                          if not msg:
+                              continue
+                          data_post = msg.get('data-post', '')
+                          if not data_post:
+                              continue
+                          mid = data_post.split('/')[-1]
+                          try:
+                              last_id = int(mid)
+                          except:
+                              continue
 
-                  data_post = msg.get('data-post', '')
-                  if not data_post: continue
-                  mid = data_post.split('/')[-1]
-                  try: last_id = int(mid)
-                  except: continue
+                          # متن
+                          text_div = msg.select_one('.tgme_widget_message_text')
+                          text = ''
+                          if text_div:
+                              h = html2text.HTML2Text()
+                              h.ignore_links = False
+                              h.ignore_images = True
+                              text = h.handle(str(text_div)).strip()
 
-                  text_div = msg.select_one('.tgme_widget_message_text')
-                  text = ''
-                  if text_div:
-                      h = html2text.HTML2Text()
-                      h.ignore_links = False
-                      h.ignore_images = True
-                      text = h.handle(str(text_div)).strip()
+                          # تاریخ
+                          time_tag = msg.select_one('.tgme_widget_message_date time')
+                          if time_tag and time_tag.has_attr('datetime'):
+                              date_str = time_tag['datetime']
+                          else:
+                              date_str = datetime.now(timezone.utc).isoformat()
 
-                  time_tag = msg.select_one('.tgme_widget_message_date time')
-                  date_str = time_tag['datetime'] if time_tag and time_tag.has_attr('datetime') else datetime.utcnow().isoformat()
+                          # مدیا
+                          media = []
+                          for p in msg.select('.tgme_widget_message_photo_wrap'):
+                              m = re.search(r"url\(['\"]?(.*?)['\"]?\)", p.get('style',''))
+                              if m:
+                                  media.append(('photo', m.group(1)))
+                          for v in msg.select('.tgme_widget_message_video'):
+                              src = v.get('src') or v.get('data-src')
+                              if src:
+                                  media.append(('video', src))
+                          for d in msg.select('.tgme_widget_message_document'):
+                              classes = d.get('class', [])
+                              dtype = 'document'
+                              if 'message_voice' in classes: dtype = 'voice'
+                              elif 'message_audio' in classes: dtype = 'audio'
+                              elif 'message_sticker' in classes: dtype = 'sticker'
+                              a = d.select_one('a')
+                              href = a.get('href') if a else ''
+                              if href.startswith('/'):
+                                  href = f'https://t.me{href}'
+                              media.append((dtype, href if href.startswith('http') else None))
+                          for s in msg.select('.tgme_widget_message_sticker img'):
+                              src = s.get('src')
+                              if src:
+                                  media.append(('sticker', src))
 
-                  media = []
-                  # عکس‌ها
-                  for p in msg.select('.tgme_widget_message_photo_wrap'):
-                      m = re.search(r"url\(['\"]?(.*?)['\"]?\)", p.get('style',''))
-                      if m: media.append(('photo', m.group(1)))
-                  # ویدیو
-                  for v in msg.select('.tgme_widget_message_video'):
-                      src = v.get('src') or v.get('data-src')
-                      if src: media.append(('video', src))
-                  # اسناد (فایل/صوت/ویس/استیکر)
-                  for d in msg.select('.tgme_widget_message_document'):
-                      classes = d.get('class', [])
-                      if 'message_voice' in classes: dtype = 'voice'
-                      elif 'message_audio' in classes: dtype = 'audio'
-                      elif 'message_sticker' in classes: dtype = 'sticker'
-                      else: dtype = 'document'
-                      a = d.select_one('a')
-                      href = a.get('href') if a else ''
-                      if href.startswith('/'): href = f'https://t.me{href}'
-                      media.append((dtype, href if href.startswith('http') else None))
-                  # استیکر مستقل
-                  for s in msg.select('.tgme_widget_message_sticker img'):
-                      src = s.get('src')
-                      if src: media.append(('sticker', src))
+                          messages.append({'id': mid, 'date': date_str, 'text': text, 'media': media})
+                          need -= 1
 
-                  messages.append({'id':mid, 'date':date_str, 'text':text, 'media':media})
-                  need -= 1
+                      if len(wraps) < 20:
+                          break
+                      time.sleep(0.8)
 
-              if len(wraps) < 20: break
-              time.sleep(0.8)
+                  print(f"✅ {len(messages)} پست اسکرپ شد.")
 
-          print(f"✅ {len(messages)} پست آماده ذخیره‌سازی")
+                  post_folders = []
 
-          # ─── ذخیره‌سازی در پوشه‌های مرتب ───
-          post_folders = []
-          for msg in messages:
-              dt = datetime.fromisoformat(msg['date'].replace('Z','+00:00'))
-              folder_name = f"{dt.strftime('%Y-%m-%d_%H%M%S')}_{msg['id']}"
-              fpath = DOWNLOAD_DIR / folder_name
-              fpath.mkdir(parents=True, exist_ok=True)
-              post_folders.append(folder_name)
+                  for msg in messages:
+                      # تجزیه تاریخ (تحمل فرمت‌های مختلف)
+                      try:
+                          # ممکن است Z یا +00:00 یا بدون منطقه زمانی باشد
+                          d = msg['date'].replace('Z', '+00:00')
+                          dt = datetime.fromisoformat(d)
+                      except:
+                          dt = datetime.now(timezone.utc)
 
-              # دانلود مدیا
-              files = []
-              for idx, (mtype, url) in enumerate(msg['media'], 1):
-                  if not url or not url.startswith('http'):
-                      files.append((mtype, None, 'لینک عمومی ندارد'))
-                      continue
-                  ext = {'photo':'.jpg','video':'.mp4','sticker':'.webp','voice':'.ogg','audio':'.mp3'}.get(mtype,'.dat')
-                  if mtype=='document':
-                      ext = os.path.splitext(url.split('?')[0])[1] or '.dat'
-                  fname = f"{mtype}_{idx}{ext}"
-                  print(f"  ⬇️ دانلود {mtype}...")
-                  try:
-                      r = requests.get(url, headers=HEADERS, timeout=60)
-                      if r.status_code == 200 and r.content:
-                          (fpath / fname).write_bytes(r.content)
-                          sz = len(r.content)//1024
-                          files.append((mtype, fname, f"{sz} KB"))
-                          print(f"  ✅ ذخیره شد: {fname} ({sz} KB)")
+                      folder_name = f"{dt.strftime('%Y-%m-%d_%H%M%S')}_{msg['id']}"
+                      fpath = DOWNLOAD_DIR / folder_name
+                      fpath.mkdir(parents=True, exist_ok=True)
+                      post_folders.append(folder_name)
+
+                      print(f"\n📌 پست {msg['id']} → {folder_name}")
+
+                      files = []
+                      for idx, (mtype, url) in enumerate(msg['media'], 1):
+                          if not url or not url.startswith('http'):
+                              files.append((mtype, None, '❌ لینک عمومی ندارد'))
+                              print(f"   ⚠️ {mtype}: لینک وجود ندارد")
+                              continue
+
+                          ext = {
+                              'photo': '.jpg',
+                              'video': '.mp4',
+                              'sticker': '.webp',
+                              'voice': '.ogg',
+                              'audio': '.mp3'
+                          }.get(mtype, '.dat')
+                          if mtype == 'document':
+                              # پسوند را از URL حدس بزن
+                              ext = os.path.splitext(url.split('?')[0])[1] or '.dat'
+
+                          fname = f"{mtype}_{idx}{ext}"
+                          print(f"   ⬇️ دانلود {mtype}: {fname} ... ", end='', flush=True)
+                          try:
+                              r = requests.get(url, headers=HEADERS, timeout=60)
+                              if r.status_code == 200 and r.content:
+                                  (fpath / fname).write_bytes(r.content)
+                                  sz = len(r.content) // 1024
+                                  files.append((mtype, fname, f"{sz} KB"))
+                                  print(f"✅ {sz} KB")
+                              else:
+                                  files.append((mtype, None, f"HTTP {r.status_code}"))
+                                  print(f"⚠️ HTTP {r.status_code}")
+                          except Exception as e:
+                              files.append((mtype, None, str(e)[:80]))
+                              print(f"❌ {e}")
+                          time.sleep(0.4)
+
+                      # README.md
+                      lines = [
+                          f"# 📬 پست تلگرامی #{msg['id']}",
+                          "",
+                          "| مشخصات | مقدار |",
+                          "|--------|--------|",
+                          f"| تاریخ | {msg['date']} |",
+                          f"| کانال | @{channel} |",
+                          f"| شناسه | {msg['id']} |",
+                          ""
+                      ]
+                      if msg['text']:
+                          lines += ["## ✍️ متن پیام", "", msg['text'], ""]
+                      if files:
+                          lines += ["## 📎 فایل‌های پیوست", "",
+                                    "| نوع | نام فایل | حجم/وضعیت |",
+                                    "|-----|----------|-----------|"]
+                          for mt, fn, status in files:
+                              if fn:
+                                  lines.append(f"| {mt} | [{fn}](./{fn}) | {status} |")
+                              else:
+                                  lines.append(f"| {mt} | — | {status} |")
+                          lines.append("")
                       else:
-                          files.append((mtype, None, f"HTTP {r.status_code}"))
-                  except Exception as e:
-                      files.append((mtype, None, str(e)))
-                  time.sleep(0.4)
+                          lines.append("## 📎 بدون فایل پیوست", "")
+                      lines += ["---", "*اسکرپ شده با افتخار توسط [AnishtayiN](https://t.me/AnishtayiN)*"]
+                      (fpath / "README.md").write_text("\n".join(lines), encoding='utf-8')
 
-              # ساخت README.md
-              lines = [f"# 📬 پست تلگرامی #{msg['id']}", "",
-                       "| مشخصات | مقدار |", "|--------|--------|",
-                       f"| تاریخ | {msg['date']} |", f"| کانال | @{channel} |",
-                       f"| شناسه | {msg['id']} |", ""]
-              if msg['text']:
-                  lines += ["## ✍️ متن پیام", "", msg['text'], ""]
-              if files:
-                  lines += ["## 📎 فایل‌های پیوست", "",
-                            "| نوع | نام فایل | حجم/وضعیت |",
-                            "|-----|----------|-----------|"]
-                  for mt, fn, st in files:
-                      lines.append(f"| {mt} | [{fn}](./{fn}) | {st} |" if fn else f"| {mt} | — | {st} |")
-                  lines.append("")
-              else:
-                  lines.append("## 📎 بدون فایل پیوست", "")
-              lines += ["---", "*اسکرپ شده توسط [AnishtayiN](https://t.me/AnishtayiN)*"]
-              (fpath / "README.md").write_text("\n".join(lines), encoding='utf-8')
+                  # فهرست کلی
+                  index = ["# 📥 دانلودهای اخیر تلگرام", ""]
+                  for fn in post_folders:
+                      fe = fn.replace(' ', '%20')
+                      index.append(f"- [{fn}](https://github.com/{repo_owner}/{repo_name}/tree/{branch}/downloads/{fe})")
+                  index += ["", "---", "*AnishtayiN Downloader*"]
+                  (DOWNLOAD_DIR / "README.md").write_text("\n".join(index), encoding='utf-8')
 
-          # فهرست کلی
-          index = ["# 📥 دانلودهای تلگرام", ""]
-          for fn in post_folders:
-              fe = fn.replace(' ', '%20')
-              index.append(f"- [{fn}](https://github.com/{repo_owner}/{repo_name}/tree/{branch}/downloads/{fe})")
-          index += ["", "---", "*AnishtayiN Downloader*"]
-          (DOWNLOAD_DIR / "README.md").write_text("\n".join(index), encoding='utf-8')
+                  # به‌روزرسانی README اصلی
+                  root = Path("README.md")
+                  if not root.exists():
+                      root.write_text("# Telegram Scraper\n", encoding='utf-8')
+                  content = root.read_text(encoding='utf-8')
+                  section = "📥 آخرین پست‌های دانلود شده از تلگرام"
+                  marker = f"## {section}"
+                  if marker in content:
+                      idx = content.index(marker)
+                      rest = content[idx:]
+                      next_sep = rest.find("---", len(marker))
+                      if next_sep != -1:
+                          rest = rest[next_sep+3:]
+                      else:
+                          rest = ""
+                      content = content[:idx] + rest
+                  links = "\n".join(
+                      f"{i}. [{fn}](https://github.com/{repo_owner}/{repo_name}/tree/{branch}/downloads/{fn.replace(' ', '%20')})"
+                      for i, fn in enumerate(post_folders, 1)
+                  )
+                  content = content.strip() + f"\n\n## {section}\n\n{links}\n\n---\n"
+                  root.write_text(content, encoding='utf-8')
 
-          # به‌روزرسانی README اصلی
-          root = Path("README.md")
-          if not root.exists(): root.write_text("# Telegram Scraper\n", encoding='utf-8')
-          content = root.read_text(encoding='utf-8')
-          section = "📥 آخرین پست‌های دانلود شده از تلگرام"
-          if f"## {section}" in content:
-              idx = content.index(f"## {section}")
-              rest = content[idx:]
-              next_sep = rest.find("---", len(f"## {section}"))
-              content = content[:idx] + (rest[next_sep+3:] if next_sep!=-1 else "")
-          links = "\n".join(f"{i}. [{fn}](https://github.com/{repo_owner}/{repo_name}/tree/{branch}/downloads/{fn.replace(' ', '%20')})" for i,fn in enumerate(post_folders,1))
-          content = content.strip() + f"\n\n## {section}\n\n{links}\n\n---\n"
-          root.write_text(content, encoding='utf-8')
-
-          print("\n🎉 اسکرپ و ذخیره‌سازی کامل شد!")
+                  print("\n🎉 همه چیز با موفقیت انجام شد.")
+              except Exception:
+                  print("❌ خطای کلی در اسکریپت:")
+                  traceback.print_exc()
+                  # باز هم با کد صفر خارج شو تا workflow ادامه یابد و فایل‌های موجود commit شوند
+          if __name__ == "__main__":
+              main()
           PYEOF
 
-      - name: Commit & Push (با Git Auto Commit)
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "📥 اسکرپ پست‌های تلگرام [skip ci]"
-          file_pattern: 'README.md downloads/**'
-          commit_user_name: github-actions
-          commit_user_email: actions@github.com
-          branch: ${{ github.ref_name }}
+      - name: commit و push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add README.md downloads/
+
+          if [ -z "$(git diff --cached --name-only)" ]; then
+            echo "چیزی برای commit وجود ندارد."
+            exit 0
+          fi
+
+          git commit -m "📥 اسکرپ پست‌های تلگرام [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # تنظیم remote با توکن برای احراز هویت
+          GIT_REMOTE_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+        shell: bash
