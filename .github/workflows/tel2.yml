@@ -1,4 +1,4 @@
-name: 📥 Telegram Scraper
+name: 📥 Telegram
 
 on:
   workflow_dispatch:
@@ -57,7 +57,6 @@ jobs:
                   branch = os.environ['BRANCH']
 
                   BASE_URL = f"https://t.me/s/{channel}"
-                  # پوشه مقصد: downloads/tel/نام_کانال/
                   TEL_ROOT = Path('downloads/tel') / channel
                   TEL_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -151,11 +150,10 @@ jobs:
 
                   print(f"✅ {len(messages)} پست اسکرپ شد.")
 
-                  post_folders = []  # ذخیره نام پوشه‌های نسبی (فقط نام پوشه هر پست)
-                  posts_for_html = [] # برای ساخت chat.html
+                  post_folders = []
+                  posts_for_html = []
 
                   for msg in messages:
-                      # تجزیه تاریخ
                       try:
                           d = msg['date'].replace('Z', '+00:00')
                           dt = datetime.fromisoformat(d)
@@ -169,13 +167,12 @@ jobs:
 
                       print(f"\n📌 پست {msg['id']} → {folder_name}")
 
-                      files = []  # لیست (نوع, نام فایل, وضعیت)
-                      media_html_list = []  # برای chat.html
+                      files = []
+                      media_html_list = []
 
                       for idx, (mtype, url) in enumerate(msg['media'], 1):
                           if not url or not url.startswith('http'):
                               files.append((mtype, None, '❌ لینک عمومی ندارد'))
-                              print(f"   ⚠️ {mtype}: لینک وجود ندارد")
                               continue
 
                           ext = {
@@ -197,7 +194,6 @@ jobs:
                                   sz = len(r.content) // 1024
                                   files.append((mtype, fname, f"{sz} KB"))
                                   print(f"✅ {sz} KB")
-                                  # آماده‌سازی برای HTML
                                   rel_path = f"{folder_name}/{fname}"
                                   if mtype == 'photo':
                                       media_html_list.append(f'<img src="{rel_path}" class="msg-photo" alt="photo" loading="lazy">')
@@ -209,7 +205,7 @@ jobs:
                                       media_html_list.append(f'<audio controls src="{rel_path}"></audio>')
                                   elif mtype == 'sticker':
                                       media_html_list.append(f'<img src="{rel_path}" class="msg-sticker" alt="sticker" loading="lazy">')
-                                  else:  # document
+                                  else:
                                       media_html_list.append(f'<a href="{rel_path}" class="msg-doc">📄 {fname} ({sz} KB)</a>')
                               else:
                                   files.append((mtype, None, f"HTTP {r.status_code}"))
@@ -219,7 +215,6 @@ jobs:
                               print(f"❌ {e}")
                           time.sleep(0.4)
 
-                      # ذخیره اطلاعات برای HTML
                       posts_for_html.append({
                           'id': msg['id'],
                           'date': msg['date'],
@@ -255,17 +250,14 @@ jobs:
                       lines += ["---", "*اسکرپ شده با افتخار توسط [AnishtayiN](https://t.me/AnishtayiN)*"]
                       (fpath / "README.md").write_text("\n".join(lines), encoding='utf-8')
 
-                  # ─── ساخت chat.html ───
-                  # مرتب‌سازی بر اساس تاریخ (قدیمی‌ترین اول)
+                  # تولید chat.html
                   posts_for_html.sort(key=lambda x: x['date'])
 
-                  # تبدیل تاریخ به فرمت خوانا
                   def format_fa_date(iso_str):
                       try:
                           dt = datetime.fromisoformat(iso_str.replace('Z','+00:00'))
                       except:
                           return iso_str
-                      # تاریخ شمسی؟ ساده تاریخ میلادی و ساعت
                       return dt.strftime('%Y/%m/%d %H:%M')
 
                   html_parts = []
@@ -379,7 +371,6 @@ jobs:
                       html_parts.append('<div class="message">')
                       html_parts.append('<div class="bubble">')
                       if post['text']:
-                          # جایگزینی خط‌های جدید با <br> و فرار HTML
                           escaped_text = post['text'].replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
                           escaped_text = escaped_text.replace('\n', '<br>')
                           html_parts.append(f'<div class="msg-text">{escaped_text}</div>')
@@ -395,8 +386,11 @@ jobs:
                   chat_html_path = TEL_ROOT / 'chat.html'
                   chat_html_path.write_text('\n'.join(html_parts), encoding='utf-8')
                   print(f"\n🎨 chat.html تولید شد: {chat_html_path}")
+                  if not chat_html_path.exists():
+                      print("❌ خطا: chat.html ساخته نشد!")
+                      raise FileNotFoundError("chat.html creation failed")
 
-                  # فهرست کلی برای پوشه tel/کانال
+                  # README مخصوص این کانال
                   index_md = TEL_ROOT / "README.md"
                   lines = [f"# 📥 پست‌های کانال @{channel}", ""]
                   lines.append(f"**مشاهده چت:** [chat.html](chat.html)")
@@ -406,13 +400,19 @@ jobs:
                   lines += ["", "---", "*AnishtayiN Downloader*"]
                   index_md.write_text("\n".join(lines), encoding='utf-8')
 
-                  # به‌روزرسانی README اصلی (در ریشه مخزن)
+                  # به‌روزرسانی README اصلی
+                  now_utc = datetime.now(timezone.utc)
+                  update_time_str = now_utc.strftime('%Y/%m/%d %H:%M') + ' UTC'
+
                   root = Path("README.md")
                   if not root.exists():
                       root.write_text("# Telegram Scraper\n", encoding='utf-8')
                   content = root.read_text(encoding='utf-8')
                   section = "📥 آخرین پست‌های دانلود شده از تلگرام"
                   marker = f"## {section}"
+                  channel_link = f"https://github.com/{repo_owner}/{repo_name}/tree/{branch}/downloads/tel/{channel}"
+
+                  # حذف لینک قبلی همین کانال (اگر وجود دارد)
                   if marker in content:
                       idx = content.index(marker)
                       rest = content[idx:]
@@ -422,16 +422,16 @@ jobs:
                       else:
                           rest = ""
                       content = content[:idx] + rest
-                  channel_link = f"https://github.com/{repo_owner}/{repo_name}/tree/{branch}/downloads/tel/{channel}"
-                  new_entry = f"- [@{channel}]({channel_link}) ← [مشاهده چت]({channel_link}/chat.html)"
-                  # اگر قبلاً لینکی برای این کانال وجود داشت، آن را حذف می‌کنیم (با تطبیق ساده)
-                  lines = content.split('\n')
-                  cleaned_lines = []
-                  for line in lines:
+                  # پاک‌سازی خط‌های قدیمی مربوط به این کانال
+                  content_lines = content.split('\n')
+                  cleaned = []
+                  for line in content_lines:
                       if channel_link in line:
                           continue
-                      cleaned_lines.append(line)
-                  content = '\n'.join(cleaned_lines).strip()
+                      cleaned.append(line)
+                  content = '\n'.join(cleaned).strip()
+
+                  new_entry = f"- [@{channel}]({channel_link}) ← 🕒 آخرین به‌روزرسانی: {update_time_str} | [مشاهده چت]({channel_link}/chat.html)"
                   content += f"\n\n## {section}\n\n{new_entry}\n\n---\n"
                   root.write_text(content, encoding='utf-8')
 
@@ -439,6 +439,7 @@ jobs:
               except Exception:
                   print("❌ خطای کلی در اسکریپت:")
                   traceback.print_exc()
+                  sys.exit(1)   # خروج با خطا تا workflow متوقف شود و مشکل مشخص شود
           if __name__ == "__main__":
               main()
           PYEOF
