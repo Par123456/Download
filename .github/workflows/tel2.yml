@@ -40,228 +40,247 @@ jobs:
           BRANCH: ${{ github.ref_name }}
         run: |
           python3 <<'PYEOF'
-          import os, sys, re, time, json, traceback
+          import os, sys, re, time, traceback
           from datetime import datetime, timezone
           from pathlib import Path
           import requests
           from bs4 import BeautifulSoup
           import html2text
 
-          def main():
+          # فایل خطا برای ذخیره مشکل
+          ERROR_LOG = Path("error.log")
+
+          def log_error(msg):
+              ERROR_LOG.write_text(msg, encoding='utf-8')
+
+          try:
+              channel_raw = os.environ['CHANNEL'].strip()
+              channel = channel_raw.replace('@','').replace('https://t.me/s/','').replace('https://t.me/','').rstrip('/')
+              count = int(os.environ['COUNT'])
+              repo_owner = os.environ['REPO_OWNER']
+              repo_name = os.environ['REPO_NAME']
+              branch = os.environ['BRANCH']
+
+              BASE_URL = f"https://t.me/s/{channel}"
+              TEL_ROOT = Path('downloads/tel') / channel
+              TEL_ROOT.mkdir(parents=True, exist_ok=True)
+
+              HEADERS = {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              }
+
+              print(f"📡 کانال: @{channel} | تعداد درخواستی: {count}")
+
+              # تست اولیه اتصال
               try:
-                  channel_raw = os.environ['CHANNEL'].strip()
-                  channel = channel_raw.replace('@','').replace('https://t.me/s/','').replace('https://t.me/','').rstrip('/')
-                  count = int(os.environ['COUNT'])
-                  repo_owner = os.environ['REPO_OWNER']
-                  repo_name = os.environ['REPO_NAME']
-                  branch = os.environ['BRANCH']
+                  test_resp = requests.get(BASE_URL, headers=HEADERS, timeout=15)
+                  if test_resp.status_code != 200:
+                      raise Exception(f"HTTP {test_resp.status_code} - کانال در دسترس نیست یا خصوصی است")
+              except Exception as e:
+                  msg = f"❌ اتصال به {BASE_URL} ناموفق: {e}"
+                  print(msg)
+                  log_error(msg)
+                  sys.exit(1)
 
-                  BASE_URL = f"https://t.me/s/{channel}"
-                  TEL_ROOT = Path('downloads/tel') / channel
-                  TEL_ROOT.mkdir(parents=True, exist_ok=True)
+              messages = []
+              last_id = None
+              need = count
 
-                  HEADERS = {
-                      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                  }
+              while need > 0:
+                  url = BASE_URL if not last_id else f"{BASE_URL}?before={last_id}"
+                  print(f"   🔗 دریافت: {url}")
+                  resp = requests.get(url, headers=HEADERS, timeout=20)
+                  if resp.status_code != 200:
+                      print(f"   ⚠️ HTTP {resp.status_code} - توقف")
+                      break
 
-                  print(f"📡 کانال: @{channel} | تعداد درخواستی: {count}")
+                  soup = BeautifulSoup(resp.text, 'html.parser')
+                  wraps = soup.select('.tgme_widget_message_wrap')
+                  if not wraps:
+                      print("   🚫 هیچ پستی وجود ندارد")
+                      break
 
-                  messages = []
-                  last_id = None
-                  need = count
-
-                  while need > 0:
-                      url = BASE_URL if not last_id else f"{BASE_URL}?before={last_id}"
-                      print(f"   🔗 دریافت: {url}")
-                      resp = requests.get(url, headers=HEADERS, timeout=20)
-                      if resp.status_code != 200:
-                          print(f"   ⚠️ HTTP {resp.status_code} - توقف")
+                  for wrap in wraps:
+                      if need <= 0:
                           break
-
-                      soup = BeautifulSoup(resp.text, 'html.parser')
-                      wraps = soup.select('.tgme_widget_message_wrap')
-                      if not wraps:
-                          print("   🚫 هیچ پستی وجود ندارد (کانال خصوصی یا نامعتبر)")
-                          break
-
-                      for wrap in wraps:
-                          if need <= 0:
-                              break
-                          msg = wrap.select_one('.tgme_widget_message')
-                          if not msg:
-                              continue
-                          data_post = msg.get('data-post', '')
-                          if not data_post:
-                              continue
-                          mid = data_post.split('/')[-1]
-                          try:
-                              last_id = int(mid)
-                          except:
-                              continue
-
-                          # متن
-                          text_div = msg.select_one('.tgme_widget_message_text')
-                          text = ''
-                          if text_div:
-                              h = html2text.HTML2Text()
-                              h.ignore_links = False
-                              h.ignore_images = True
-                              text = h.handle(str(text_div)).strip()
-
-                          # تاریخ
-                          time_tag = msg.select_one('.tgme_widget_message_date time')
-                          if time_tag and time_tag.has_attr('datetime'):
-                              date_str = time_tag['datetime']
-                          else:
-                              date_str = datetime.now(timezone.utc).isoformat()
-
-                          # مدیا
-                          media = []
-                          for p in msg.select('.tgme_widget_message_photo_wrap'):
-                              m = re.search(r"url\(['\"]?(.*?)['\"]?\)", p.get('style',''))
-                              if m:
-                                  media.append(('photo', m.group(1)))
-                          for v in msg.select('.tgme_widget_message_video'):
-                              src = v.get('src') or v.get('data-src')
-                              if src:
-                                  media.append(('video', src))
-                          for d in msg.select('.tgme_widget_message_document'):
-                              classes = d.get('class', [])
-                              dtype = 'document'
-                              if 'message_voice' in classes: dtype = 'voice'
-                              elif 'message_audio' in classes: dtype = 'audio'
-                              elif 'message_sticker' in classes: dtype = 'sticker'
-                              a = d.select_one('a')
-                              href = a.get('href') if a else ''
-                              if href.startswith('/'):
-                                  href = f'https://t.me{href}'
-                              media.append((dtype, href if href.startswith('http') else None))
-                          for s in msg.select('.tgme_widget_message_sticker img'):
-                              src = s.get('src')
-                              if src:
-                                  media.append(('sticker', src))
-
-                          messages.append({'id': mid, 'date': date_str, 'text': text, 'media': media})
-                          need -= 1
-
-                      if len(wraps) < 20:
-                          break
-                      time.sleep(0.8)
-
-                  print(f"✅ {len(messages)} پست اسکرپ شد.")
-
-                  post_folders = []
-                  posts_for_html = []
-
-                  for msg in messages:
+                      msg = wrap.select_one('.tgme_widget_message')
+                      if not msg:
+                          continue
+                      data_post = msg.get('data-post', '')
+                      if not data_post:
+                          continue
+                      mid = data_post.split('/')[-1]
                       try:
-                          d = msg['date'].replace('Z', '+00:00')
-                          dt = datetime.fromisoformat(d)
+                          last_id = int(mid)
                       except:
-                          dt = datetime.now(timezone.utc)
+                          continue
 
-                      folder_name = f"{dt.strftime('%Y-%m-%d_%H%M%S')}_{msg['id']}"
-                      fpath = TEL_ROOT / folder_name
-                      fpath.mkdir(parents=True, exist_ok=True)
-                      post_folders.append(folder_name)
+                      text_div = msg.select_one('.tgme_widget_message_text')
+                      text = ''
+                      if text_div:
+                          h = html2text.HTML2Text()
+                          h.ignore_links = False
+                          h.ignore_images = True
+                          text = h.handle(str(text_div)).strip()
 
-                      print(f"\n📌 پست {msg['id']} → {folder_name}")
-
-                      files = []
-                      media_html_list = []
-
-                      for idx, (mtype, url) in enumerate(msg['media'], 1):
-                          if not url or not url.startswith('http'):
-                              files.append((mtype, None, '❌ لینک عمومی ندارد'))
-                              continue
-
-                          ext = {
-                              'photo': '.jpg',
-                              'video': '.mp4',
-                              'sticker': '.webp',
-                              'voice': '.ogg',
-                              'audio': '.mp3'
-                          }.get(mtype, '.dat')
-                          if mtype == 'document':
-                              ext = os.path.splitext(url.split('?')[0])[1] or '.dat'
-
-                          fname = f"{mtype}_{idx}{ext}"
-                          print(f"   ⬇️ دانلود {mtype}: {fname} ... ", end='', flush=True)
-                          try:
-                              r = requests.get(url, headers=HEADERS, timeout=60)
-                              if r.status_code == 200 and r.content:
-                                  (fpath / fname).write_bytes(r.content)
-                                  sz = len(r.content) // 1024
-                                  files.append((mtype, fname, f"{sz} KB"))
-                                  print(f"✅ {sz} KB")
-                                  rel_path = f"{folder_name}/{fname}"
-                                  if mtype == 'photo':
-                                      media_html_list.append(f'<img src="{rel_path}" class="msg-photo" alt="photo" loading="lazy">')
-                                  elif mtype == 'video':
-                                      media_html_list.append(f'<video controls class="msg-video"><source src="{rel_path}" type="video/mp4"></video>')
-                                  elif mtype == 'audio':
-                                      media_html_list.append(f'<audio controls src="{rel_path}"></audio>')
-                                  elif mtype == 'voice':
-                                      media_html_list.append(f'<audio controls src="{rel_path}"></audio>')
-                                  elif mtype == 'sticker':
-                                      media_html_list.append(f'<img src="{rel_path}" class="msg-sticker" alt="sticker" loading="lazy">')
-                                  else:
-                                      media_html_list.append(f'<a href="{rel_path}" class="msg-doc">📄 {fname} ({sz} KB)</a>')
-                              else:
-                                  files.append((mtype, None, f"HTTP {r.status_code}"))
-                                  print(f"⚠️ HTTP {r.status_code}")
-                          except Exception as e:
-                              files.append((mtype, None, str(e)[:80]))
-                              print(f"❌ {e}")
-                          time.sleep(0.4)
-
-                      posts_for_html.append({
-                          'id': msg['id'],
-                          'date': msg['date'],
-                          'text': msg['text'],
-                          'media_html': media_html_list
-                      })
-
-                      # README.md
-                      lines = [
-                          f"# 📬 پست تلگرامی #{msg['id']}",
-                          "",
-                          "| مشخصات | مقدار |",
-                          "|--------|--------|",
-                          f"| تاریخ | {msg['date']} |",
-                          f"| کانال | @{channel} |",
-                          f"| شناسه | {msg['id']} |",
-                          ""
-                      ]
-                      if msg['text']:
-                          lines += ["## ✍️ متن پیام", "", msg['text'], ""]
-                      if files:
-                          lines += ["## 📎 فایل‌های پیوست", "",
-                                    "| نوع | نام فایل | حجم/وضعیت |",
-                                    "|-----|----------|-----------|"]
-                          for mt, fn, status in files:
-                              if fn:
-                                  lines.append(f"| {mt} | [{fn}](./{fn}) | {status} |")
-                              else:
-                                  lines.append(f"| {mt} | — | {status} |")
-                          lines.append("")
+                      time_tag = msg.select_one('.tgme_widget_message_date time')
+                      if time_tag and time_tag.has_attr('datetime'):
+                          date_str = time_tag['datetime']
                       else:
-                          lines.append("## 📎 بدون فایل پیوست", "")
-                      lines += ["---", "*اسکرپ شده با افتخار توسط [AnishtayiN](https://t.me/AnishtayiN)*"]
-                      (fpath / "README.md").write_text("\n".join(lines), encoding='utf-8')
+                          date_str = datetime.now(timezone.utc).isoformat()
 
-                  # تولید chat.html
-                  posts_for_html.sort(key=lambda x: x['date'])
+                      media = []
+                      for p in msg.select('.tgme_widget_message_photo_wrap'):
+                          m = re.search(r"url\(['\"]?(.*?)['\"]?\)", p.get('style',''))
+                          if m:
+                              media.append(('photo', m.group(1)))
+                      for v in msg.select('.tgme_widget_message_video'):
+                          src = v.get('src') or v.get('data-src')
+                          if src:
+                              media.append(('video', src))
+                      for d in msg.select('.tgme_widget_message_document'):
+                          classes = d.get('class', [])
+                          dtype = 'document'
+                          if 'message_voice' in classes: dtype = 'voice'
+                          elif 'message_audio' in classes: dtype = 'audio'
+                          elif 'message_sticker' in classes: dtype = 'sticker'
+                          a = d.select_one('a')
+                          href = a.get('href') if a else ''
+                          if href.startswith('/'):
+                              href = f'https://t.me{href}'
+                          media.append((dtype, href if href.startswith('http') else None))
+                      for s in msg.select('.tgme_widget_message_sticker img'):
+                          src = s.get('src')
+                          if src:
+                              media.append(('sticker', src))
 
-                  def format_fa_date(iso_str):
+                      messages.append({'id': mid, 'date': date_str, 'text': text, 'media': media})
+                      need -= 1
+
+                  if len(wraps) < 20:
+                      break
+                  time.sleep(0.8)
+
+              print(f"✅ {len(messages)} پست اسکرپ شد.")
+
+              if not messages:
+                  msg = "❌ هیچ پستی پیدا نشد (کانال خالی یا خصوصی)"
+                  print(msg)
+                  log_error(msg)
+                  sys.exit(1)
+
+              post_folders = []
+              posts_for_html = []
+
+              for msg in messages:
+                  try:
+                      d = msg['date'].replace('Z', '+00:00')
+                      dt = datetime.fromisoformat(d)
+                  except:
+                      dt = datetime.now(timezone.utc)
+
+                  folder_name = f"{dt.strftime('%Y-%m-%d_%H%M%S')}_{msg['id']}"
+                  fpath = TEL_ROOT / folder_name
+                  fpath.mkdir(parents=True, exist_ok=True)
+                  post_folders.append(folder_name)
+
+                  print(f"\n📌 پست {msg['id']} → {folder_name}")
+
+                  files = []
+                  media_html_list = []
+
+                  for idx, (mtype, url) in enumerate(msg['media'], 1):
+                      if not url or not url.startswith('http'):
+                          files.append((mtype, None, '❌ لینک عمومی ندارد'))
+                          continue
+
+                      ext = {
+                          'photo': '.jpg',
+                          'video': '.mp4',
+                          'sticker': '.webp',
+                          'voice': '.ogg',
+                          'audio': '.mp3'
+                      }.get(mtype, '.dat')
+                      if mtype == 'document':
+                          ext = os.path.splitext(url.split('?')[0])[1] or '.dat'
+
+                      fname = f"{mtype}_{idx}{ext}"
+                      print(f"   ⬇️ دانلود {mtype}: {fname} ... ", end='', flush=True)
                       try:
-                          dt = datetime.fromisoformat(iso_str.replace('Z','+00:00'))
-                      except:
-                          return iso_str
-                      return dt.strftime('%Y/%m/%d %H:%M')
+                          r = requests.get(url, headers=HEADERS, timeout=60)
+                          if r.status_code == 200 and r.content:
+                              (fpath / fname).write_bytes(r.content)
+                              sz = len(r.content) // 1024
+                              files.append((mtype, fname, f"{sz} KB"))
+                              print(f"✅ {sz} KB")
+                              rel_path = f"{folder_name}/{fname}"
+                              if mtype == 'photo':
+                                  media_html_list.append(f'<img src="{rel_path}" class="msg-photo" alt="photo" loading="lazy">')
+                              elif mtype == 'video':
+                                  media_html_list.append(f'<video controls class="msg-video"><source src="{rel_path}" type="video/mp4"></video>')
+                              elif mtype == 'audio':
+                                  media_html_list.append(f'<audio controls src="{rel_path}"></audio>')
+                              elif mtype == 'voice':
+                                  media_html_list.append(f'<audio controls src="{rel_path}"></audio>')
+                              elif mtype == 'sticker':
+                                  media_html_list.append(f'<img src="{rel_path}" class="msg-sticker" alt="sticker" loading="lazy">')
+                              else:
+                                  media_html_list.append(f'<a href="{rel_path}" class="msg-doc">📄 {fname} ({sz} KB)</a>')
+                          else:
+                              files.append((mtype, None, f"HTTP {r.status_code}"))
+                              print(f"⚠️ HTTP {r.status_code}")
+                      except Exception as e:
+                          files.append((mtype, None, str(e)[:80]))
+                          print(f"❌ {e}")
+                      time.sleep(0.4)
 
-                  html_parts = []
-                  html_parts.append(f'''<!DOCTYPE html>
+                  posts_for_html.append({
+                      'id': msg['id'],
+                      'date': msg['date'],
+                      'text': msg['text'],
+                      'media_html': media_html_list
+                  })
+
+                  # README.md
+                  lines = [
+                      f"# 📬 پست تلگرامی #{msg['id']}",
+                      "",
+                      "| مشخصات | مقدار |",
+                      "|--------|--------|",
+                      f"| تاریخ | {msg['date']} |",
+                      f"| کانال | @{channel} |",
+                      f"| شناسه | {msg['id']} |",
+                      ""
+                  ]
+                  if msg['text']:
+                      lines += ["## ✍️ متن پیام", "", msg['text'], ""]
+                  if files:
+                      lines += ["## 📎 فایل‌های پیوست", "",
+                                "| نوع | نام فایل | حجم/وضعیت |",
+                                "|-----|----------|-----------|"]
+                      for mt, fn, status in files:
+                          if fn:
+                              lines.append(f"| {mt} | [{fn}](./{fn}) | {status} |")
+                          else:
+                              lines.append(f"| {mt} | — | {status} |")
+                      lines.append("")
+                  else:
+                      lines.append("## 📎 بدون فایل پیوست", "")
+                  lines += ["---", "*اسکرپ شده توسط AnishtayiN*"]
+                  (fpath / "README.md").write_text("\n".join(lines), encoding='utf-8')
+
+              # تولید chat.html
+              posts_for_html.sort(key=lambda x: x['date'])
+
+              def format_fa_date(iso_str):
+                  try:
+                      dt = datetime.fromisoformat(iso_str.replace('Z','+00:00'))
+                  except:
+                      return iso_str
+                  return dt.strftime('%Y/%m/%d %H:%M')
+
+              html_parts = []
+              html_parts.append(f'''<!DOCTYPE html>
           <html lang="fa" dir="rtl">
           <head>
           <meta charset="UTF-8">
@@ -277,85 +296,39 @@ jobs:
             --link: #6ab3f3;
           }}
           body {{
-            margin: 0;
-            padding: 0;
+            margin: 0; padding: 0;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: var(--bg);
-            color: var(--text);
+            background-color: var(--bg); color: var(--text);
             direction: rtl;
           }}
           .chat-container {{
-            max-width: 700px;
-            margin: 20px auto;
-            padding: 20px 15px;
-            display: flex;
-            flex-direction: column;
-            gap: 18px;
+            max-width: 700px; margin: 20px auto; padding: 20px 15px;
+            display: flex; flex-direction: column; gap: 18px;
           }}
           .header {{
-            text-align: center;
-            background: var(--msg-bg);
-            padding: 15px;
-            border-radius: 12px;
-            margin-bottom: 10px;
+            text-align: center; background: var(--msg-bg);
+            padding: 15px; border-radius: 12px; margin-bottom: 10px;
             border: 1px solid var(--border);
           }}
-          .header h2 {{
-            margin: 0;
-            font-size: 1.4rem;
-          }}
-          .message {{
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-          }}
+          .header h2 {{ margin: 0; font-size: 1.4rem; }}
+          .message {{ display: flex; flex-direction: column; align-items: flex-end; }}
           .bubble {{
-            background-color: var(--msg-bg);
-            padding: 12px 16px;
-            border-radius: 12px;
-            max-width: 80%;
-            word-wrap: break-word;
+            background-color: var(--msg-bg); padding: 12px 16px;
+            border-radius: 12px; max-width: 80%; word-wrap: break-word;
             box-shadow: 0 1px 2px rgba(0,0,0,0.4);
             border: 1px solid var(--border);
           }}
-          .msg-date {{
-            font-size: 0.75rem;
-            color: #7b8a9c;
-            margin-top: 6px;
-            align-self: flex-end;
-          }}
-          .msg-text {{
-            line-height: 1.6;
-            white-space: pre-wrap;
-          }}
-          .msg-photo {{
-            max-width: 100%;
-            border-radius: 8px;
-            margin-top: 8px;
-          }}
-          .msg-video {{
-            max-width: 100%;
-            border-radius: 8px;
-            margin-top: 8px;
-          }}
-          .msg-sticker {{
-            max-width: 120px;
-          }}
+          .msg-date {{ font-size: 0.75rem; color: #7b8a9c; margin-top: 6px; align-self: flex-end; }}
+          .msg-text {{ line-height: 1.6; white-space: pre-wrap; }}
+          .msg-photo {{ max-width: 100%; border-radius: 8px; margin-top: 8px; }}
+          .msg-video {{ max-width: 100%; border-radius: 8px; margin-top: 8px; }}
+          .msg-sticker {{ max-width: 120px; }}
           .msg-doc {{
-            display: inline-block;
-            background: var(--accent);
-            color: white;
-            padding: 8px 12px;
-            border-radius: 8px;
-            text-decoration: none;
-            margin-top: 8px;
+            display: inline-block; background: var(--accent); color: white;
+            padding: 8px 12px; border-radius: 8px; text-decoration: none; margin-top: 8px;
           }}
-          a {{
-            color: var(--link);
-          }}
-          audio {{
-            margin-top: 8px;
-          }}
+          a {{ color: var(--link); }}
+          audio {{ margin-top: 8px; }}
           </style>
           </head>
           <body>
@@ -366,89 +339,96 @@ jobs:
           </div>
           ''')
 
-                  for post in posts_for_html:
-                      date_fa = format_fa_date(post['date'])
-                      html_parts.append('<div class="message">')
-                      html_parts.append('<div class="bubble">')
-                      if post['text']:
-                          escaped_text = post['text'].replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
-                          escaped_text = escaped_text.replace('\n', '<br>')
-                          html_parts.append(f'<div class="msg-text">{escaped_text}</div>')
-                      if post['media_html']:
-                          for media_tag in post['media_html']:
-                              html_parts.append(media_tag)
-                      html_parts.append('</div>')
-                      html_parts.append(f'<div class="msg-date">{date_fa}</div>')
-                      html_parts.append('</div>')
+              for post in posts_for_html:
+                  date_fa = format_fa_date(post['date'])
+                  html_parts.append('<div class="message">')
+                  html_parts.append('<div class="bubble">')
+                  if post['text']:
+                      escaped_text = post['text'].replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+                      escaped_text = escaped_text.replace('\n', '<br>')
+                      html_parts.append(f'<div class="msg-text">{escaped_text}</div>')
+                  if post['media_html']:
+                      for media_tag in post['media_html']:
+                          html_parts.append(media_tag)
+                  html_parts.append('</div>')
+                  html_parts.append(f'<div class="msg-date">{date_fa}</div>')
+                  html_parts.append('</div>')
 
-                  html_parts.append('</div></body></html>')
+              html_parts.append('</div></body></html>')
 
-                  chat_html_path = TEL_ROOT / 'chat.html'
-                  chat_html_path.write_text('\n'.join(html_parts), encoding='utf-8')
-                  print(f"\n🎨 chat.html تولید شد: {chat_html_path}")
-                  if not chat_html_path.exists():
-                      print("❌ خطا: chat.html ساخته نشد!")
-                      raise FileNotFoundError("chat.html creation failed")
+              chat_html_path = TEL_ROOT / 'chat.html'
+              chat_html_path.write_text('\n'.join(html_parts), encoding='utf-8')
+              if not chat_html_path.exists():
+                  raise FileNotFoundError("chat.html ساخته نشد!")
+              print(f"🎨 chat.html تولید شد: {chat_html_path}")
 
-                  # README مخصوص این کانال
-                  index_md = TEL_ROOT / "README.md"
-                  lines = [f"# 📥 پست‌های کانال @{channel}", ""]
-                  lines.append(f"**مشاهده چت:** [chat.html](chat.html)")
-                  lines.append("")
-                  for fn in post_folders:
-                      lines.append(f"- [{fn}](./{fn})")
-                  lines += ["", "---", "*AnishtayiN Downloader*"]
-                  index_md.write_text("\n".join(lines), encoding='utf-8')
+              # README کانال
+              index_md = TEL_ROOT / "README.md"
+              lines = [f"# 📥 پست‌های کانال @{channel}", "",
+                       f"**مشاهده چت:** [chat.html](chat.html)", ""]
+              for fn in post_folders:
+                  lines.append(f"- [{fn}](./{fn})")
+              lines += ["", "---", "*AnishtayiN Downloader*"]
+              index_md.write_text("\n".join(lines), encoding='utf-8')
 
-                  # به‌روزرسانی README اصلی
-                  now_utc = datetime.now(timezone.utc)
-                  update_time_str = now_utc.strftime('%Y/%m/%d %H:%M') + ' UTC'
+              # به‌روزرسانی README اصلی
+              now_utc = datetime.now(timezone.utc)
+              update_time_str = now_utc.strftime('%Y/%m/%d %H:%M') + ' UTC'
 
-                  root = Path("README.md")
-                  if not root.exists():
-                      root.write_text("# Telegram Scraper\n", encoding='utf-8')
-                  content = root.read_text(encoding='utf-8')
-                  section = "📥 آخرین پست‌های دانلود شده از تلگرام"
-                  marker = f"## {section}"
-                  channel_link = f"https://github.com/{repo_owner}/{repo_name}/tree/{branch}/downloads/tel/{channel}"
+              root = Path("README.md")
+              if not root.exists():
+                  root.write_text("# Telegram Scraper\n", encoding='utf-8')
+              content = root.read_text(encoding='utf-8')
+              section = "📥 آخرین پست‌های دانلود شده از تلگرام"
+              marker = f"## {section}"
+              channel_link = f"https://github.com/{repo_owner}/{repo_name}/tree/{branch}/downloads/tel/{channel}"
 
-                  # حذف لینک قبلی همین کانال (اگر وجود دارد)
-                  if marker in content:
-                      idx = content.index(marker)
-                      rest = content[idx:]
-                      next_sep = rest.find("---", len(marker))
-                      if next_sep != -1:
-                          rest = rest[next_sep+3:]
-                      else:
-                          rest = ""
-                      content = content[:idx] + rest
-                  # پاک‌سازی خط‌های قدیمی مربوط به این کانال
-                  content_lines = content.split('\n')
-                  cleaned = []
-                  for line in content_lines:
-                      if channel_link in line:
-                          continue
-                      cleaned.append(line)
-                  content = '\n'.join(cleaned).strip()
+              if marker in content:
+                  idx = content.index(marker)
+                  rest = content[idx:]
+                  next_sep = rest.find("---", len(marker))
+                  if next_sep != -1:
+                      rest = rest[next_sep+3:]
+                  else:
+                      rest = ""
+                  content = content[:idx] + rest
 
-                  new_entry = f"- [@{channel}]({channel_link}) ← 🕒 آخرین به‌روزرسانی: {update_time_str} | [مشاهده چت]({channel_link}/chat.html)"
-                  content += f"\n\n## {section}\n\n{new_entry}\n\n---\n"
-                  root.write_text(content, encoding='utf-8')
+              content_lines = content.split('\n')
+              cleaned = [line for line in content_lines if channel_link not in line]
+              content = '\n'.join(cleaned).strip()
 
-                  print("\n🎉 همه چیز با موفقیت انجام شد.")
-              except Exception:
-                  print("❌ خطای کلی در اسکریپت:")
-                  traceback.print_exc()
-                  sys.exit(1)   # خروج با خطا تا workflow متوقف شود و مشکل مشخص شود
-          if __name__ == "__main__":
-              main()
+              new_entry = f"- [@{channel}]({channel_link}) ← 🕒 آخرین به‌روزرسانی: {update_time_str} | [چت]({channel_link}/chat.html)"
+              content += f"\n\n## {section}\n\n{new_entry}\n\n---\n"
+              root.write_text(content, encoding='utf-8')
+
+              # در صورت موفقیت، فایل error.log را حذف می‌کنیم (اگر از قبل وجود داشت)
+              if ERROR_LOG.exists():
+                  ERROR_LOG.unlink()
+
+              print("\n🎉 همه چیز با موفقیت انجام شد.")
+
+          except Exception:
+              err_msg = traceback.format_exc()
+              print("❌ خطا:")
+              print(err_msg)
+              log_error(err_msg)
+              sys.exit(1)
           PYEOF
 
-      - name: commit و push
+      - name: ذخیره فایل خطا (در صورت وجود)
+        if: failure()
+        run: |
+          if [ -f error.log ]; then
+            echo "📄 محتوای error.log:"
+            cat error.log
+          fi
+
+      - name: commit و push (حتی در صورت خطا برای ارسال error.log)
+        if: always()
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add README.md downloads/
+          git add README.md downloads/ error.log 2>/dev/null || true
 
           if [ -z "$(git diff --cached --name-only)" ]; then
             echo "چیزی برای commit وجود ندارد."
