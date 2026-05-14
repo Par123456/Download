@@ -1,0 +1,129 @@
+name: 🌐 DNS Resolver Scanner
+
+on:
+  workflow_dispatch:
+    inputs:
+      dns_ips:
+        description: 'لیست DNSها (با فاصله جدا کنید)'
+        required: true
+        type: string
+      test_domains:
+        description: 'دامنه‌های تست (با فاصله جدا کنید)'
+        required: false
+        default: 'youtube.com twitter.com instagram.com google.com'
+        type: string
+      test_count:
+        description: 'تعداد تست برای هر DNS'
+        required: false
+        default: '20'
+        type: string
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: دریافت کد
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: آماده‌سازی محیط
+        run: |
+          echo "📡 در حال آماده‌سازی ابزارهای تست..."
+          sudo apt-get update -qq > /dev/null 2>&1
+          sudo apt-get install -y bc curl dnsutils > /dev/null 2>&1
+          
+          # نصب dnspyre (ابزار بنچمارک حرفه‌ای)
+          wget -q https://github.com/Tantalor93/dnspyre/releases/download/v1.3.2/dnspyre-linux-amd64 -O /tmp/dnspyre
+          chmod +x /tmp/dnspyre
+          sudo mv /tmp/dnspyre /usr/local/bin/dnspyre
+          
+          echo "✅ ابزارها آماده شدند"
+
+      - name: اجرای اسکن DNS
+        env:
+          DNS_IPS: ${{ github.event.inputs.dns_ips }}
+          TEST_DOMAINS: ${{ github.event.inputs.test_domains }}
+          TEST_COUNT: ${{ github.event.inputs.test_count }}
+        run: |
+          echo "🔍 شروع تحلیل کارایی DNSها از دید سرور خارج از ایران"
+          echo "⚠️ توجه: نتایج با شرایط واقعی داخل ایران متفاوت خواهد بود."
+          
+          mkdir -p results
+          REPORT_FILE="results/scan_report_$(date +%Y%m%d_%H%M%S).md"
+          
+          echo "# 📊 نتایج اسکن DNS (از دید سرور خارج از ایران)" > $REPORT_FILE
+          echo "" >> $REPORT_FILE
+          echo "**تاریخ:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> $REPORT_FILE
+          echo "**تعداد تست برای هر DNS:** $TEST_COUNT" >> $REPORT_FILE
+          echo "**دامنه‌های تست:** $TEST_DOMAINS" >> $REPORT_FILE
+          echo "" >> $REPORT_FILE
+          echo "| ردیف | DNS Server | میانگین تأخیر | وضعیت | دقت پاسخ‌ها |" >> $REPORT_FILE
+          echo "|------|------------|----------------|--------|--------------|" >> $REPORT_FILE
+          
+          counter=1
+          for DNS_IP in $DNS_IPS; do
+            echo "  ➡️ تست $DNS_IP"
+            
+            # تست دسترسی اولیه
+            if timeout 2 bash -c "echo > /dev/udp/$DNS_IP/53" 2>/dev/null; then
+              PORT_STATUS="باز"
+            else
+              PORT_STATUS="بسته/فیلتر"
+            fi
+            
+            # بنچمارک با dnspyre
+            sudo dnspyre -s $DNS_IP --tcp -n $TEST_COUNT $TEST_DOMAINS > /tmp/dns_result.txt 2>&1
+            
+            # استخراج میانگین تأخیر
+            AVG_LATENCY=$(grep "mean:" /tmp/dns_result.txt | awk '{print $2}' | tail -1)
+            if [ -z "$AVG_LATENCY" ]; then
+              AVG_LATENCY="N/A"
+            fi
+            
+            # بررسی دقت پاسخ‌ها
+            SUCCESS_COUNT=$(grep "NOERROR" /tmp/dns_result.txt | grep -oP '\d+' | head -1)
+            if [ -z "$SUCCESS_COUNT" ]; then
+              SUCCESS_COUNT="0"
+            fi
+            TOTAL_QUERIES=$((TEST_COUNT * 5))  # 5 دامنه
+            ACCURACY=$(echo "scale=1; ($SUCCESS_COUNT / $TOTAL_QUERIES) * 100" | bc 2>/dev/null || echo "0")
+            
+            echo "| $counter | $DNS_IP | ${AVG_LATENCY} | $PORT_STATUS | ${ACCURACY}% |" >> $REPORT_FILE
+            counter=$((counter + 1))
+            
+            # ذخیره خروجی کامل برای تحلیل
+            cp /tmp/dns_result.txt "results/${DNS_IP//./_}.log"
+            echo "  ✅ تست $DNS_IP کامل شد (تأخیر: $AVG_LATENCY)"
+          done
+          
+          echo "" >> $REPORT_FILE
+          echo "---" >> $REPORT_FILE
+          echo "*نتایج بر اساس تست از محیط خارج از ایران. برای ارزیابی واقعی، باید از داخل ایران تست شود.*" >> $REPORT_FILE
+          
+          echo "✅ اسکن کامل شد. نتایج در $REPORT_FILE ذخیره شد."
+
+      - name: تحلیل و رتبه‌بندی نهایی
+        run: |
+          REPORT_FILE=$(ls results/scan_report_*.md | head -1)
+          echo "📈 رتبه‌بندی DNSها بر اساس سرعت:"
+          grep "|" $REPORT_FILE | grep -v "ردیف" | grep -v "\-\-\-" | sort -t'|' -k3
+          
+          # پیشنهاد DNS برای ایران
+          echo ""
+          echo "💡 پیشنهادات برای کاربران ایران:"
+          echo "  - از DNSهای عمومی بین‌المللی مثل 8.8.8.8 در ایران استفاده نکنید (فیلتر هستند)."
+          echo "  - DNSهای ایرانی مثل شکن (178.22.122.100) یا بگذر (185.55.226.26) گزینه‌های بهتری هستند."
+          echo "  - ترکیب DNS-over-HTTPS با یک پروکسی معتبر توصیه می‌شود."
+
+      - name: commit گزارش‌ها
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add results/
+          git commit -m "📊 بروزرسانی نتایج اسکن DNS" || echo "بدون تغییر"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git push origin HEAD:${{ github.ref_name }} || echo "خطا در push"
